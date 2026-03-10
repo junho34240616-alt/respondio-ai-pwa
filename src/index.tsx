@@ -399,8 +399,19 @@ function loginPage() {
           </button>
         </div>
       </form>
-      <div class="mt-4 text-center">
-        <a href="/dashboard" class="text-xs text-gray-400 hover:text-brand-500">데모 대시보드 바로가기 →</a>
+      <div class="mt-4 text-center space-y-2">
+        <a href="/dashboard" class="text-xs text-gray-400 hover:text-brand-500 block">데모 대시보드 바로가기 →</a>
+        <div class="border-t border-gray-100 pt-3 mt-3">
+          <p class="text-[10px] text-gray-400 mb-2">테스트 계정</p>
+          <div class="flex gap-2 justify-center">
+            <button onclick="fillOwner()" class="text-[10px] bg-brand-50 text-brand-600 px-3 py-1.5 rounded-lg hover:bg-brand-100 transition font-medium">
+              <i class="fas fa-store mr-1"></i>사장님 로그인
+            </button>
+            <button onclick="fillAdmin()" class="text-[10px] bg-dark-800 text-white px-3 py-1.5 rounded-lg hover:bg-dark-700 transition font-medium">
+              <i class="fas fa-shield-alt mr-1"></i>관리자 로그인
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -411,7 +422,28 @@ function loginPage() {
       document.getElementById('tab-login').className = 'flex-1 py-2.5 rounded-lg text-sm font-semibold ' + (tab === 'login' ? 'bg-white shadow text-gray-900' : 'text-gray-500');
       document.getElementById('tab-signup').className = 'flex-1 py-2.5 rounded-lg text-sm font-semibold ' + (tab === 'signup' ? 'bg-white shadow text-gray-900' : 'text-gray-500');
     }
-    function handleLogin(e) { e.preventDefault(); window.location.href = '/dashboard'; }
+    function fillOwner() {
+      document.getElementById('login-email').value = 'owner@test.com';
+      document.getElementById('login-pw').value = 'password';
+      switchTab('login');
+    }
+    function fillAdmin() {
+      document.getElementById('login-email').value = 'admin@respondio.com';
+      document.getElementById('login-pw').value = 'admin123';
+      switchTab('login');
+    }
+    function handleLogin(e) {
+      e.preventDefault();
+      const email = document.getElementById('login-email').value;
+      // 관리자 계정이면 관리자 대시보드로
+      if (email.includes('admin@')) {
+        localStorage.setItem('respondio_user', JSON.stringify({ role: 'admin', email }));
+        window.location.href = '/admin';
+      } else {
+        localStorage.setItem('respondio_user', JSON.stringify({ role: 'owner', email }));
+        window.location.href = '/dashboard';
+      }
+    }
     function handleSignup(e) { e.preventDefault(); window.location.href = '/dashboard'; }
   </script>
 </body>
@@ -683,6 +715,9 @@ function reviewsPage() {
     <div class="flex items-center justify-between mb-6">
       <h1 class="text-2xl font-bold text-gray-900">리뷰 관리</h1>
       <div class="flex items-center gap-3">
+        <button onclick="syncReviews()" class="bg-green-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-600 transition shadow-lg shadow-green-500/30" id="btn-sync">
+          <i class="fas fa-sync-alt mr-2"></i>리뷰 수집
+        </button>
         <button onclick="batchGenerate()" class="border border-brand-500 text-brand-500 px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-50 transition" id="btn-batch-gen">
           <i class="fas fa-wand-magic-sparkles mr-2"></i>AI 일괄 생성
         </button>
@@ -862,6 +897,34 @@ function reviewsPage() {
         location.reload();
       } catch(e) { alert('일괄 생성 실패: ' + e.message); }
       finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-wand-magic-sparkles mr-2"></i>AI 일괄 생성'; }
+    }
+
+    async function syncReviews() {
+      const btn = document.getElementById('btn-sync');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>수집 중...';
+      try {
+        // 3개 플랫폼 순차 수집
+        let totalInserted = 0;
+        for (const platform of ['baemin', 'coupang_eats', 'yogiyo']) {
+          try {
+            const res = await fetch('/api/v1/reviews/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ platform, store_id: 1 })
+            });
+            const data = await res.json();
+            if (data.inserted) totalInserted += data.inserted;
+          } catch(e) { console.error(platform, e); }
+        }
+        if (totalInserted > 0) {
+          alert(totalInserted + '건의 새 리뷰가 수집되었습니다!');
+          location.reload();
+        } else {
+          alert('새로운 리뷰가 없거나 크롤러 서버가 실행 중이 아닙니다.\\n\\n크롤러 시작: pm2 start crawler/ecosystem.config.cjs');
+        }
+      } catch(e) { alert('리뷰 수집 실패: ' + e.message); }
+      finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>리뷰 수집'; }
     }
     function applyFilter() {}
     function resetFilters() { renderReviews(allReviews); }
@@ -1157,6 +1220,7 @@ function adminDashboardPage() {
       ${[
         { icon: 'fa-chart-line', label: '운영 현황', active: true },
         { icon: 'fa-users', label: '사용자 관리', active: false },
+        { icon: 'fa-spider', label: '크롤러 관리', active: false },
         { icon: 'fa-file-alt', label: '로그', active: false },
         { icon: 'fa-database', label: '큐 관리', active: false }
       ].map(it => `
@@ -1184,21 +1248,32 @@ function adminDashboardPage() {
     </header>
 
     <div class="p-6 space-y-6">
+      <!-- Top Bar -->
+      <div class="flex items-center justify-between mb-2">
+        <div>
+          <h1 class="text-xl font-bold text-white">운영 현황</h1>
+          <p class="text-xs text-gray-500 mt-1">Respondio 관리자 대시보드</p>
+        </div>
+        <a href="/login" class="text-xs bg-white/10 text-gray-300 px-4 py-2 rounded-lg hover:bg-white/20 transition">
+          <i class="fas fa-sign-out-alt mr-1"></i>로그아웃
+        </a>
+      </div>
+
       <!-- KPI Cards -->
       <div class="grid grid-cols-3 gap-4">
-        <div class="bg-dark-800 rounded-2xl p-6 border border-white/5">
+        <div class="admin-kpi bg-dark-800 rounded-2xl p-6 border border-white/5">
           <div class="flex items-center gap-2 text-gray-400 text-sm mb-2"><i class="fas fa-users"></i>전체 가입자</div>
-          <div class="text-3xl font-bold text-white mb-1">12,450</div>
-          <div class="text-xs text-red-400"><i class="fas fa-arrow-up"></i> +1.8% 어제</div>
+          <div class="text-3xl font-bold text-white mb-1 kpi-value">-</div>
+          <div class="text-xs text-green-400"><i class="fas fa-arrow-up"></i> +1.8% 어제</div>
         </div>
-        <div class="bg-dark-800 rounded-2xl p-6 border border-white/5">
+        <div class="admin-kpi bg-dark-800 rounded-2xl p-6 border border-white/5">
           <div class="flex items-center gap-2 text-gray-400 text-sm mb-2"><i class="fas fa-user-check"></i>활성 구독자</div>
-          <div class="text-3xl font-bold text-white mb-1">9,230</div>
-          <div class="text-xs text-red-400"><i class="fas fa-arrow-up"></i> +0.5% 어제</div>
+          <div class="text-3xl font-bold text-white mb-1 kpi-value">-</div>
+          <div class="text-xs text-green-400"><i class="fas fa-arrow-up"></i> +0.5% 어제</div>
         </div>
-        <div class="bg-red-900/30 border border-red-500/20 rounded-2xl p-6">
+        <div class="admin-kpi bg-red-900/30 border border-red-500/20 rounded-2xl p-6">
           <div class="flex items-center gap-2 text-gray-400 text-sm mb-2"><i class="fas fa-exclamation-triangle"></i>에러율</div>
-          <div class="text-3xl font-bold text-red-400 mb-1">3.8%</div>
+          <div class="text-3xl font-bold text-red-400 mb-1 kpi-value">-</div>
           <div class="text-xs text-green-400"><i class="fas fa-arrow-down"></i> -1.2% 어제</div>
         </div>
       </div>
@@ -1277,10 +1352,154 @@ function adminDashboardPage() {
           </div>
         </div>
       </div>
+
+      <!-- User Management Table -->
+      <div class="bg-dark-800 rounded-2xl p-6 border border-white/5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-bold text-white">사용자 관리</h3>
+          <span class="text-xs text-gray-500">전체 사용자 목록</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="text-left text-gray-500 border-b border-white/10">
+                <th class="pb-3 px-4 font-medium">이름</th>
+                <th class="pb-3 px-4 font-medium">이메일</th>
+                <th class="pb-3 px-4 font-medium">역할</th>
+                <th class="pb-3 px-4 font-medium">가입일</th>
+              </tr>
+            </thead>
+            <tbody id="admin-users-table">
+              <tr><td colspan="4" class="text-center py-6 text-gray-500">로딩 중...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Crawler Status -->
+      <div class="bg-dark-800 rounded-2xl p-6 border border-white/5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-bold text-white"><i class="fas fa-spider mr-2 text-green-400"></i>크롤러 서버 상태</h3>
+          <span class="text-xs text-gray-500" id="crawler-status-badge">확인 중...</span>
+        </div>
+        <div class="grid grid-cols-3 gap-4 mb-4" id="crawler-platforms">
+          <div class="bg-dark-900 rounded-xl p-4 text-center">
+            <div class="text-sm text-gray-400 mb-1">배달의민족</div>
+            <div class="text-xs text-gray-500">세션 확인 중...</div>
+          </div>
+          <div class="bg-dark-900 rounded-xl p-4 text-center">
+            <div class="text-sm text-gray-400 mb-1">쿠팡이츠</div>
+            <div class="text-xs text-gray-500">세션 확인 중...</div>
+          </div>
+          <div class="bg-dark-900 rounded-xl p-4 text-center">
+            <div class="text-sm text-gray-400 mb-1">요기요</div>
+            <div class="text-xs text-gray-500">세션 확인 중...</div>
+          </div>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="triggerCrawl()" class="text-xs bg-green-500/20 text-green-400 px-4 py-2 rounded-lg hover:bg-green-500/30 transition">
+            <i class="fas fa-play mr-1"></i>전체 수집 실행
+          </button>
+          <button onclick="checkCrawler()" class="text-xs bg-blue-500/20 text-blue-400 px-4 py-2 rounded-lg hover:bg-blue-500/30 transition">
+            <i class="fas fa-heartbeat mr-1"></i>상태 확인
+          </button>
+        </div>
+      </div>
     </div>
   </main>
 
   <script>
+    // Check admin auth
+    const user = JSON.parse(localStorage.getItem('respondio_user') || '{}');
+    if (user.role !== 'admin' && !window.location.search.includes('demo=1')) {
+      // Allow demo access but show notice
+    }
+
+    // Load admin stats from API
+    fetch('/api/v1/admin/stats').then(r=>r.json()).then(data => {
+      const cards = document.querySelectorAll('.admin-kpi');
+      if(cards.length >= 3) {
+        cards[0].querySelector('.kpi-value').textContent = (data.total_users || 0).toLocaleString();
+        cards[1].querySelector('.kpi-value').textContent = (data.active_subscriptions || 0).toLocaleString();
+        cards[2].querySelector('.kpi-value').textContent = (data.error_rate || 0) + '%';
+      }
+    }).catch(e => {});
+
+    // Load admin logs
+    fetch('/api/v1/admin/logs').then(r=>r.json()).then(data => {
+      const logs = data.logs || [];
+      const container = document.getElementById('admin-logs');
+      if(!container || !logs.length) return;
+      container.innerHTML = logs.slice(0,8).map(log => {
+        const time = new Date(log.created_at).toLocaleTimeString('ko-KR', {hour:'2-digit',minute:'2-digit'});
+        const typeMap = { review_sync:'리뷰 수집', ai_generate:'AI 생성', reply_post:'답변 등록' };
+        const type = typeMap[log.job_type] || log.job_type;
+        const statusColor = log.status === 'completed' ? 'bg-green-500/20 text-green-400' : log.status === 'failed' ? 'bg-red-500/20 text-red-400' : log.status === 'dlq' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-blue-500/20 text-blue-400';
+        return '<div class="flex items-center gap-4 py-2 border-b border-white/5"><span class="text-xs text-gray-500 w-12">'+time+'</span><span class="text-xs px-2 py-0.5 rounded '+statusColor+' font-medium">'+type+'</span><span class="text-sm text-gray-300 flex-1">'+(log.error_message || log.status)+'</span>'+(log.status==='failed'||log.status==='dlq'?'<button onclick="retryJob('+log.id+')" class="text-xs bg-brand-500/20 text-brand-400 px-2 py-1 rounded hover:bg-brand-500/40"><i class="fas fa-redo"></i></button>':'')+'</div>';
+      }).join('');
+    }).catch(e => {});
+
+    // Load users for admin
+    fetch('/api/v1/admin/users').then(r=>r.json()).then(data => {
+      const users = data.users || [];
+      const container = document.getElementById('admin-users-table');
+      if(!container) return;
+      container.innerHTML = users.map(u => {
+        const roleBadge = u.role === 'super_admin' ? '<span class="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full">슈퍼관리자</span>' : u.role === 'admin' ? '<span class="text-xs bg-yellow-500/20 text-yellow-400 px-2 py-0.5 rounded-full">관리자</span>' : '<span class="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full">사장님</span>';
+        return '<tr class="border-b border-white/5 hover:bg-white/5"><td class="py-3 px-4 text-sm text-gray-300">'+u.name+'</td><td class="py-3 px-4 text-sm text-gray-400">'+u.email+'</td><td class="py-3 px-4">'+roleBadge+'</td><td class="py-3 px-4 text-xs text-gray-500">'+new Date(u.created_at).toLocaleDateString('ko-KR')+'</td></tr>';
+      }).join('');
+    }).catch(e => {});
+
+    async function retryJob(id) {
+      try {
+        await fetch('/api/v1/admin/jobs/' + id + '/retry', { method: 'POST' });
+        location.reload();
+      } catch(e) { alert('재시도 실패'); }
+    }
+
+    // Crawler status check
+    async function checkCrawler() {
+      try {
+        const res = await fetch('/api/v1/crawler/status');
+        const data = await res.json();
+        const badge = document.getElementById('crawler-status-badge');
+        if (data.crawler_status === 'online') {
+          badge.innerHTML = '<span class="text-green-400"><i class="fas fa-circle text-[8px] mr-1"></i>온라인</span>';
+          // Update platform cards
+          const platforms = document.getElementById('crawler-platforms');
+          if (data.sessions) {
+            const platformNames = { baemin: '배달의민족', coupang_eats: '쿠팡이츠', yogiyo: '요기요' };
+            platforms.innerHTML = Object.entries(platformNames).map(([key, name]) => {
+              const session = data.sessions?.[key];
+              const status = session?.loggedIn ? '<span class="text-green-400 text-xs"><i class="fas fa-check-circle mr-1"></i>연결됨</span>' : '<span class="text-gray-500 text-xs"><i class="fas fa-minus-circle mr-1"></i>미연결</span>';
+              return '<div class="bg-dark-900 rounded-xl p-4 text-center"><div class="text-sm text-gray-300 mb-2">' + name + '</div>' + status + '</div>';
+            }).join('');
+          }
+        } else {
+          badge.innerHTML = '<span class="text-red-400"><i class="fas fa-circle text-[8px] mr-1"></i>오프라인</span>';
+        }
+      } catch(e) {
+        document.getElementById('crawler-status-badge').innerHTML = '<span class="text-red-400"><i class="fas fa-circle text-[8px] mr-1"></i>오프라인</span>';
+      }
+    }
+    checkCrawler(); // Initial check
+
+    async function triggerCrawl() {
+      try {
+        const res = await fetch('/api/v1/reviews/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ platform: 'baemin', store_id: 1 })
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert('리뷰 수집 완료: ' + (data.inserted || 0) + '건 추가');
+        } else {
+          alert(data.error || '수집 실패');
+        }
+      } catch(e) { alert('크롤러 서버가 실행 중이 아닙니다.'); }
+    }
+
     // Error Rate Chart
     new Chart(document.getElementById('errorChart'), {
       type: 'line',

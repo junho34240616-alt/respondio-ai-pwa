@@ -5,3 +5,4 @@ dist/
 *.log
 .pm2/
 pids/
+crawler/node_modules/

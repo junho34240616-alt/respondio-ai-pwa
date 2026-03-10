@@ -455,6 +455,162 @@ apiRoutes.post('/admin/jobs/:id/retry', async (c) => {
   return c.json({ success: true })
 })
 
+// ============ CRAWLER INTEGRATION ============
+// 크롤러 서버에서 수집한 리뷰를 DB에 저장
+apiRoutes.post('/crawler/reviews', async (c) => {
+  const db = c.env.DB
+  const { reviews, store_id } = await c.req.json()
+
+  if (!reviews || !Array.isArray(reviews)) {
+    return c.json({ error: 'reviews array required' }, 400)
+  }
+
+  let insertedCount = 0
+  let skippedCount = 0
+
+  for (const review of reviews) {
+    try {
+      // 중복 체크 (platform_review_id로)
+      if (review.platform_review_id) {
+        const existing = await db.prepare(
+          'SELECT id FROM reviews WHERE platform_review_id = ? AND store_id = ?'
+        ).bind(review.platform_review_id, store_id || 1).first()
+        
+        if (existing) {
+          skippedCount++
+          continue
+        }
+      }
+
+      // 리뷰 삽입
+      await db.prepare(`
+        INSERT INTO reviews (store_id, platform, platform_review_id, customer_name, rating, review_text, menu_items, sentiment, status, customer_type, is_repeat_customer, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, datetime('now'))
+      `).bind(
+        store_id || 1,
+        review.platform || 'baemin',
+        review.platform_review_id || null,
+        review.customer_name || '고객',
+        review.rating || 4.0,
+        review.review_text || '',
+        typeof review.menu_items === 'string' ? review.menu_items : JSON.stringify(review.menu_items || []),
+        review.sentiment || null,
+        review.customer_type || 'new',
+        review.is_repeat_customer || 0
+      ).run()
+
+      insertedCount++
+
+      // 고객 테이블 업데이트
+      if (review.customer_name) {
+        const customerKey = `${review.platform}-${review.customer_name}`
+        const existingCustomer = await db.prepare(
+          'SELECT id, order_count FROM customers WHERE store_id = ? AND customer_key = ?'
+        ).bind(store_id || 1, customerKey).first()
+
+        if (existingCustomer) {
+          const newCount = (existingCustomer.order_count as number) + 1
+          const newType = newCount >= 5 ? 'loyal' : newCount >= 2 ? 'repeat' : 'new'
+          await db.prepare(
+            'UPDATE customers SET order_count = ?, customer_type = ?, last_order_at = datetime("now") WHERE id = ?'
+          ).bind(newCount, newType, existingCustomer.id).run()
+        } else {
+          await db.prepare(
+            'INSERT INTO customers (store_id, customer_key, customer_name, customer_type, order_count, last_order_at) VALUES (?, ?, ?, ?, 1, datetime("now"))'
+          ).bind(store_id || 1, customerKey, review.customer_name, 'new').run()
+        }
+      }
+
+      // 작업 로그 기록
+      await db.prepare(
+        "INSERT INTO job_logs (job_type, status, payload, created_at) VALUES ('review_sync', 'completed', ?, datetime('now'))"
+      ).bind(JSON.stringify({ platform: review.platform, review_id: review.platform_review_id })).run()
+
+    } catch (e: any) {
+      console.error('Failed to insert review:', e.message)
+      // 실패 로그
+      await db.prepare(
+        "INSERT INTO job_logs (job_type, status, error_message, payload, created_at) VALUES ('review_sync', 'failed', ?, ?, datetime('now'))"
+      ).bind(e.message, JSON.stringify({ platform: review.platform })).run()
+    }
+  }
+
+  return c.json({
+    success: true,
+    inserted: insertedCount,
+    skipped: skippedCount,
+    total: reviews.length
+  })
+})
+
+// 크롤러 서버 상태 프록시
+apiRoutes.get('/crawler/status', async (c) => {
+  try {
+    const crawlerUrl = 'http://localhost:4000/health'
+    const response = await fetch(crawlerUrl)
+    const data = await response.json()
+    return c.json({ crawler_status: 'online', ...data })
+  } catch (e) {
+    return c.json({ crawler_status: 'offline', message: '크롤러 서버가 실행 중이 아닙니다.' })
+  }
+})
+
+// 크롤러를 통한 리뷰 수집 트리거
+apiRoutes.post('/reviews/sync', async (c) => {
+  const { platform, store_id } = await c.req.json()
+  
+  try {
+    const crawlerUrl = 'http://localhost:4000/fetch-reviews'
+    const response = await fetch(crawlerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform: platform || 'baemin', store_id: store_id || 1, demo: true })
+    })
+    const fetchResult = await response.json() as any
+    
+    if (!fetchResult.success) {
+      return c.json({ error: 'Crawl failed', details: fetchResult })
+    }
+
+    // 가져온 리뷰를 DB에 저장
+    const db = c.env.DB
+    let insertedCount = 0
+    
+    for (const review of (fetchResult.reviews || [])) {
+      try {
+        await db.prepare(`
+          INSERT INTO reviews (store_id, platform, platform_review_id, customer_name, rating, review_text, menu_items, sentiment, status, customer_type, is_repeat_customer, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, datetime('now'))
+        `).bind(
+          store_id || 1,
+          review.platform || platform || 'baemin',
+          review.platform_review_id,
+          review.customer_name,
+          review.rating,
+          review.review_text,
+          typeof review.menu_items === 'string' ? review.menu_items : JSON.stringify(review.menu_items || []),
+          review.sentiment || null,
+          review.customer_type || 'new',
+          review.is_repeat_customer || 0
+        ).run()
+        insertedCount++
+      } catch (e: any) {
+        console.error('Insert error:', e.message)
+      }
+    }
+
+    return c.json({
+      success: true,
+      platform: fetchResult.platform,
+      fetched: fetchResult.count,
+      inserted: insertedCount,
+      mode: fetchResult.mode
+    })
+  } catch (e: any) {
+    return c.json({ error: `Crawler unavailable: ${e.message}`, hint: 'Start crawler: pm2 start crawler/ecosystem.config.cjs' })
+  }
+})
+
 // ============ TEMPLATE FALLBACK ============
 function getTemplateFallback(sentiment: string, customerName: string) {
   const templates: Record<string, { text: string; score: number }[]> = {
