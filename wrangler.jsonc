@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "respondio",
+  "compatibility_date": "2026-03-10",
+  "pages_build_output_dir": "./dist",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "respondio-production",
+      "database_id": "local-dev-placeholder"
+    }
+  ]
+}
