@@ -4,6 +4,8 @@ import { apiRoutes } from './routes/api'
 
 type Bindings = {
   DB: D1Database
+  OPENAI_API_KEY: string
+  OPENAI_BASE_URL: string
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -652,9 +654,17 @@ function dashboardPage() {
       \`).join('');
     });
 
-    function generateReply(id) {
-      alert('AI 답변이 생성되었습니다! (데모)');
-      location.reload();
+    async function generateReply(id) {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>AI 생성 중...';
+      try {
+        const res = await fetch('/api/v1/reviews/' + id + '/generate', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        location.reload();
+      } catch(e) { alert('AI 답변 생성 실패: ' + e.message); }
+      finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-magic mr-1"></i>답변 생성'; }
     }
   </script>
 </body>
@@ -673,6 +683,9 @@ function reviewsPage() {
     <div class="flex items-center justify-between mb-6">
       <h1 class="text-2xl font-bold text-gray-900">리뷰 관리</h1>
       <div class="flex items-center gap-3">
+        <button onclick="batchGenerate()" class="border border-brand-500 text-brand-500 px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-50 transition" id="btn-batch-gen">
+          <i class="fas fa-wand-magic-sparkles mr-2"></i>AI 일괄 생성
+        </button>
         <button onclick="approveAll()" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition shadow-lg shadow-brand-500/30">
           <i class="fas fa-check-double mr-2"></i>전체 승인
         </button>
@@ -837,13 +850,72 @@ function reviewsPage() {
       if(tab === 'all') renderReviews(allReviews);
       else renderReviews(allReviews.filter(r => r.status === tab));
     }
+    async function batchGenerate() {
+      const btn = document.getElementById('btn-batch-gen');
+      btn.disabled = true;
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>AI 생성 중...';
+      try {
+        const res = await fetch('/api/v1/reviews/batch-generate', { method:'POST' });
+        const data = await res.json();
+        if(data.error) { alert(data.error); return; }
+        alert(data.generated_count + '건의 AI 답변이 생성되었습니다!');
+        location.reload();
+      } catch(e) { alert('일괄 생성 실패: ' + e.message); }
+      finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-wand-magic-sparkles mr-2"></i>AI 일괄 생성'; }
+    }
     function applyFilter() {}
     function resetFilters() { renderReviews(allReviews); }
-    function regenerate() { alert('답변이 재생성되었습니다! (데모)'); }
+    async function regenerate() {
+      if(!selectedReview) return;
+      const panel = document.getElementById('ai-response-content');
+      panel.innerHTML = '<div class="text-center py-8"><i class="fas fa-spinner fa-spin text-brand-500 text-2xl"></i><p class="mt-3 text-sm text-gray-500">AI가 새로운 답변을 생성하고 있습니다...</p></div>';
+      try {
+        const res = await fetch('/api/v1/reviews/' + selectedReview.id + '/generate', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { alert(data.error); selectReview(selectedReview.id); return; }
+        // Refresh reviews
+        const rr = await fetch('/api/v1/reviews?limit=50');
+        const rd = await rr.json();
+        allReviews = rd.reviews || [];
+        renderReviews(allReviews);
+        selectedReview.candidate_text = data.reply_text;
+        selectedReview.quality_score = data.quality_score;
+        selectReview(selectedReview.id);
+      } catch(e) { alert('재생성 실패: ' + e.message); selectReview(selectedReview.id); }
+    }
     function editReply() { const el = document.getElementById('reply-text'); if(el) el.contentEditable = true; el.focus(); el.style.border = '2px solid #F97316'; }
-    function approveReply(id) { alert('답변이 승인되었습니다! (데모)'); }
-    function approveAll() { alert('모든 답변이 승인되었습니다! (데모)'); }
-    function generateForReview(id) { alert('AI 답변이 생성되었습니다! (데모)'); location.reload(); }
+    async function approveReply(id) {
+      try {
+        const res = await fetch('/api/v1/reviews/approve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({review_ids:[id]}) });
+        const data = await res.json();
+        if(data.success) {
+          const rr = await fetch('/api/v1/reviews?limit=50'); const rd = await rr.json(); allReviews = rd.reviews||[]; renderReviews(allReviews);
+          document.getElementById('ai-response-content').innerHTML = '<div class="text-center py-8"><i class="fas fa-check-circle text-green-500 text-3xl"></i><p class="mt-3 text-sm text-green-600 font-semibold">답변이 승인되었습니다!</p></div>';
+        }
+      } catch(e) { alert('승인 실패: ' + e.message); }
+    }
+    async function approveAll() {
+      const generatedIds = allReviews.filter(r => r.status === 'generated').map(r => r.id);
+      if(!generatedIds.length) { alert('승인할 답변이 없습니다.'); return; }
+      try {
+        const res = await fetch('/api/v1/reviews/approve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({review_ids:generatedIds}) });
+        const data = await res.json();
+        alert(data.approved_count + '건의 답변이 승인되었습니다!');
+        location.reload();
+      } catch(e) { alert('일괄 승인 실패: ' + e.message); }
+    }
+    async function generateForReview(id) {
+      const panel = document.getElementById('ai-response-content');
+      panel.innerHTML = '<div class="text-center py-8"><i class="fas fa-spinner fa-spin text-brand-500 text-2xl"></i><p class="mt-3 text-sm text-gray-500">AI가 답변을 생성하고 있습니다...</p><p class="text-xs text-gray-400 mt-1">GPT가 리뷰를 분석 중입니다...</p></div>';
+      try {
+        const res = await fetch('/api/v1/reviews/' + id + '/generate', { method: 'POST' });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        // Refresh
+        const rr = await fetch('/api/v1/reviews?limit=50'); const rd = await rr.json(); allReviews = rd.reviews||[]; renderReviews(allReviews);
+        selectReview(id);
+      } catch(e) { alert('AI 답변 생성 실패: ' + e.message); selectReview(id); }
+    }
   </script>
 </body>
 </html>`

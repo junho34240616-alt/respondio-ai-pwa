@@ -1,8 +1,21 @@
 import { Hono } from 'hono'
+import { generateReply, analyzeSentiment, batchAnalyzeSentiments } from '../services/ai'
 
-type Bindings = { DB: D1Database }
+type Bindings = {
+  DB: D1Database
+  OPENAI_API_KEY: string
+  OPENAI_BASE_URL: string
+}
 
 export const apiRoutes = new Hono<{ Bindings: Bindings }>()
+
+// AI config helper
+function getAIConfig(c: any) {
+  return {
+    apiKey: c.env.OPENAI_API_KEY || '',
+    baseUrl: c.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'
+  }
+}
 
 // ============ AUTH ============
 apiRoutes.post('/auth/login', async (c) => {
@@ -56,42 +69,218 @@ apiRoutes.get('/reviews', async (c) => {
   return c.json({ reviews: result.results })
 })
 
+// ============ AI REPLY GENERATION (GPT 연동) ============
 apiRoutes.post('/reviews/:id/generate', async (c) => {
   const reviewId = c.req.param('id')
   const db = c.env.DB
+  const aiConfig = getAIConfig(c)
+
+  const review = await db.prepare('SELECT r.*, s.store_name, s.reply_style, s.reply_tone_sample FROM reviews r JOIN stores s ON s.id = r.store_id WHERE r.id = ?').bind(reviewId).first()
+  if (!review) return c.json({ error: 'Review not found' }, 404)
+
+  // 재생성 횟수 체크 (최대 3회)
+  const existingCandidates = await db.prepare('SELECT COUNT(*) as count FROM reply_candidates WHERE review_id = ?').bind(reviewId).first()
+  if ((existingCandidates?.count as number || 0) >= 3) {
+    return c.json({ error: '재생성 횟수 초과 (최대 3회)', max_regenerations: true }, 400)
+  }
+
+  // 금칙어 조회
+  const bannedWordsResult = await db.prepare('SELECT word FROM banned_words').all()
+  const bannedWords = bannedWordsResult.results.map((bw: any) => bw.word)
+
+  // 메뉴 아이템 파싱
+  let menuItems: string[] = []
+  try { menuItems = JSON.parse(review.menu_items as string || '[]') } catch (e) {}
+
+  // 감정 분석 (아직 안 되어 있으면 GPT로 분석)
+  let sentiment = review.sentiment as string
+  if (!sentiment && aiConfig.apiKey) {
+    try {
+      const sentimentResult = await analyzeSentiment(aiConfig, review.review_text as string)
+      sentiment = sentimentResult.sentiment
+      // DB에 감정 분석 결과 저장
+      await db.prepare('UPDATE reviews SET sentiment = ? WHERE id = ?').bind(sentiment, reviewId).run()
+    } catch (e) {
+      sentiment = 'neutral'
+    }
+  }
+
+  // GPT API 키가 있으면 실제 AI 답변 생성, 없으면 템플릿 fallback
+  let replyText: string
+  let qualityScore: number
+  let styleUsed: string
+
+  if (aiConfig.apiKey) {
+    try {
+      const result = await generateReply(aiConfig, {
+        review_text: review.review_text as string,
+        rating: review.rating as number,
+        customer_name: review.customer_name as string,
+        menu_items: menuItems,
+        platform: review.platform as string,
+        customer_type: (review.customer_type as 'new' | 'repeat' | 'loyal') || 'new',
+        sentiment,
+        store_name: review.store_name as string,
+        reply_style: (review.reply_style as any) || 'friendly',
+        reply_tone_sample: review.reply_tone_sample as string,
+        banned_words: bannedWords
+      })
+
+      replyText = result.reply_text
+      qualityScore = result.quality_score
+      styleUsed = result.style_used
+
+      // 감정 분석 결과 업데이트
+      if (result.sentiment !== sentiment) {
+        await db.prepare('UPDATE reviews SET sentiment = ? WHERE id = ?').bind(result.sentiment, reviewId).run()
+        sentiment = result.sentiment
+      }
+    } catch (e: any) {
+      console.error('GPT API error, falling back to template:', e.message)
+      // Fallback to template
+      const fallback = getTemplateFallback(sentiment, review.customer_name as string)
+      replyText = fallback.text
+      qualityScore = fallback.score
+      styleUsed = 'template_fallback'
+    }
+  } else {
+    const fallback = getTemplateFallback(sentiment, review.customer_name as string)
+    replyText = fallback.text
+    qualityScore = fallback.score
+    styleUsed = 'template'
+  }
+
+  // 기존 선택 해제
+  await db.prepare('UPDATE reply_candidates SET is_selected = 0 WHERE review_id = ?').bind(reviewId).run()
+
+  // 새 후보 저장
+  await db.prepare(
+    'INSERT INTO reply_candidates (review_id, reply_text, style_type, quality_score, is_selected, regenerate_count) VALUES (?, ?, ?, ?, 1, ?)'
+  ).bind(reviewId, replyText, styleUsed, qualityScore, (existingCandidates?.count as number || 0) + 1).run()
+
+  // 리뷰 상태 업데이트
+  await db.prepare('UPDATE reviews SET status = ? WHERE id = ?').bind('generated', reviewId).run()
+
+  return c.json({
+    reply_text: replyText,
+    quality_score: qualityScore,
+    sentiment,
+    style_used: styleUsed,
+    regeneration_count: (existingCandidates?.count as number || 0) + 1,
+    max_regenerations: 3,
+    ai_powered: !!aiConfig.apiKey
+  })
+})
+
+// ============ AI SENTIMENT ANALYSIS ============
+apiRoutes.post('/reviews/:id/analyze', async (c) => {
+  const reviewId = c.req.param('id')
+  const db = c.env.DB
+  const aiConfig = getAIConfig(c)
+
+  if (!aiConfig.apiKey) return c.json({ error: 'AI API key not configured' }, 500)
+
   const review = await db.prepare('SELECT * FROM reviews WHERE id = ?').bind(reviewId).first()
   if (!review) return c.json({ error: 'Review not found' }, 404)
 
-  // Demo AI response generation
-  const templates: Record<string, string[]> = {
-    positive: [
-      '리뷰 남겨주셔서 정말 감사합니다! 맛있게 드셨다니 보람차네요. 앞으로도 변함없는 맛으로 보답하겠습니다. 또 찾아주세요! 😊',
-      '소중한 리뷰 감사합니다! 고객님의 만족이 저희의 원동력입니다. 다음에도 맛있는 음식으로 찾아뵙겠습니다!',
-    ],
-    negative: [
-      '소중한 의견 감사합니다. 불편을 드려 정말 죄송합니다. 말씀해주신 부분을 꼭 개선하겠습니다. 다음엔 더 좋은 모습 보여드리겠습니다.',
-      '리뷰 감사합니다. 기대에 못 미쳐 죄송합니다. 품질 개선에 최선을 다하겠습니다. 다시 기회를 주시면 감사하겠습니다.',
-    ],
-    neutral: [
-      '리뷰 감사합니다! 더 나은 서비스를 위해 노력하겠습니다. 다음에도 맛있는 음식으로 찾아뵙겠습니다!',
-      '소중한 리뷰 감사합니다. 말씀해주신 부분을 참고하여 더 좋은 음식을 만들겠습니다. 감사합니다!',
-    ]
-  }
+  const result = await analyzeSentiment(aiConfig, review.review_text as string)
 
-  const sentiment = (review.sentiment as string) || 'neutral'
-  const options = templates[sentiment] || templates.neutral
-  const replyText = options[Math.floor(Math.random() * options.length)]
-  const qualityScore = 7.5 + Math.random() * 2.5
+  // DB 업데이트
+  await db.prepare('UPDATE reviews SET sentiment = ? WHERE id = ?').bind(result.sentiment, reviewId).run()
 
-  await db.prepare(
-    'INSERT INTO reply_candidates (review_id, reply_text, style_type, quality_score, is_selected) VALUES (?, ?, ?, ?, 1)'
-  ).bind(reviewId, replyText, 'friendly', qualityScore.toFixed(1)).run()
-
-  await db.prepare('UPDATE reviews SET status = ? WHERE id = ?').bind('generated', reviewId).run()
-
-  return c.json({ reply_text: replyText, quality_score: qualityScore.toFixed(1) })
+  return c.json({
+    review_id: reviewId,
+    ...result
+  })
 })
 
+// ============ BATCH SENTIMENT ANALYSIS ============
+apiRoutes.post('/reviews/batch-analyze', async (c) => {
+  const db = c.env.DB
+  const aiConfig = getAIConfig(c)
+
+  if (!aiConfig.apiKey) return c.json({ error: 'AI API key not configured' }, 500)
+
+  // 감정 분석이 안 된 리뷰들 조회
+  const unanalyzed = await db.prepare(
+    "SELECT id, review_text FROM reviews WHERE store_id = 1 AND sentiment IS NULL LIMIT 20"
+  ).all()
+
+  if (!unanalyzed.results.length) return c.json({ message: 'No reviews to analyze', count: 0 })
+
+  const results = await batchAnalyzeSentiments(
+    aiConfig,
+    unanalyzed.results.map((r: any) => ({ id: r.id, review_text: r.review_text }))
+  )
+
+  // 결과 DB 업데이트
+  for (const r of results) {
+    await db.prepare('UPDATE reviews SET sentiment = ? WHERE id = ?').bind(r.sentiment, r.id).run()
+  }
+
+  return c.json({ analyzed_count: results.length, results })
+})
+
+// ============ BATCH GENERATE (미답변 리뷰 일괄 AI 답변 생성) ============
+apiRoutes.post('/reviews/batch-generate', async (c) => {
+  const db = c.env.DB
+  const aiConfig = getAIConfig(c)
+
+  if (!aiConfig.apiKey) return c.json({ error: 'AI API key not configured' }, 500)
+
+  const pendingReviews = await db.prepare(
+    "SELECT r.*, s.store_name, s.reply_style, s.reply_tone_sample FROM reviews r JOIN stores s ON s.id = r.store_id WHERE r.store_id = 1 AND r.status = 'pending' LIMIT 10"
+  ).all()
+
+  if (!pendingReviews.results.length) return c.json({ message: 'No pending reviews', count: 0 })
+
+  const bannedWordsResult = await db.prepare('SELECT word FROM banned_words').all()
+  const bannedWords = bannedWordsResult.results.map((bw: any) => bw.word)
+
+  const generated: any[] = []
+
+  for (const review of pendingReviews.results) {
+    try {
+      let menuItems: string[] = []
+      try { menuItems = JSON.parse(review.menu_items as string || '[]') } catch (e) {}
+
+      const result = await generateReply(aiConfig, {
+        review_text: review.review_text as string,
+        rating: review.rating as number,
+        customer_name: review.customer_name as string,
+        menu_items: menuItems,
+        platform: review.platform as string,
+        customer_type: (review.customer_type as any) || 'new',
+        sentiment: review.sentiment as string,
+        store_name: review.store_name as string,
+        reply_style: (review.reply_style as any) || 'friendly',
+        reply_tone_sample: review.reply_tone_sample as string,
+        banned_words: bannedWords
+      })
+
+      // DB 저장
+      await db.prepare(
+        'INSERT INTO reply_candidates (review_id, reply_text, style_type, quality_score, is_selected, regenerate_count) VALUES (?, ?, ?, ?, 1, 1)'
+      ).bind(review.id, result.reply_text, result.style_used, result.quality_score).run()
+
+      await db.prepare('UPDATE reviews SET status = ?, sentiment = ? WHERE id = ?')
+        .bind('generated', result.sentiment, review.id).run()
+
+      generated.push({
+        review_id: review.id,
+        reply_text: result.reply_text,
+        quality_score: result.quality_score,
+        sentiment: result.sentiment
+      })
+    } catch (e: any) {
+      console.error(`Failed to generate for review ${review.id}:`, e.message)
+    }
+  }
+
+  return c.json({ generated_count: generated.length, generated })
+})
+
+// ============ APPROVE ============
 apiRoutes.post('/reviews/approve', async (c) => {
   const { review_ids } = await c.req.json()
   const db = c.env.DB
@@ -101,12 +290,26 @@ apiRoutes.post('/reviews/approve', async (c) => {
     ).bind(id).first()
     if (candidate) {
       await db.prepare(
-        'INSERT INTO replies (review_id, candidate_id, final_reply_text, post_status) VALUES (?, ?, ?, ?)'
+        'INSERT OR REPLACE INTO replies (review_id, candidate_id, final_reply_text, posted_at, post_status) VALUES (?, ?, ?, datetime("now"), ?)'
       ).bind(id, candidate.id, candidate.reply_text, 'posted').run()
       await db.prepare('UPDATE reviews SET status = ? WHERE id = ?').bind('posted', id).run()
     }
   }
   return c.json({ success: true, approved_count: review_ids.length })
+})
+
+// ============ REPLY EDIT ============
+apiRoutes.patch('/reviews/:id/reply', async (c) => {
+  const reviewId = c.req.param('id')
+  const { reply_text } = await c.req.json()
+  const db = c.env.DB
+
+  // 기존 후보 업데이트
+  await db.prepare(
+    'UPDATE reply_candidates SET reply_text = ? WHERE review_id = ? AND is_selected = 1'
+  ).bind(reply_text, reviewId).run()
+
+  return c.json({ success: true, review_id: reviewId })
 })
 
 // ============ DASHBOARD ============
@@ -121,6 +324,7 @@ apiRoutes.get('/dashboard/summary', async (c) => {
   const totalForRatio = await db.prepare('SELECT COUNT(*) as count FROM reviews WHERE store_id = ?').bind(storeId).first()
   const repeatCustomers = await db.prepare("SELECT COUNT(*) as count FROM customers WHERE store_id = ? AND customer_type IN ('repeat','loyal')").bind(storeId).first()
   const totalCustomers = await db.prepare('SELECT COUNT(*) as count FROM customers WHERE store_id = ?').bind(storeId).first()
+  const avgQuality = await db.prepare('SELECT AVG(quality_score) as avg FROM reply_candidates WHERE is_selected = 1 AND review_id IN (SELECT id FROM reviews WHERE store_id = ?)').bind(storeId).first()
 
   return c.json({
     total_reviews: totalReviews?.count || 0,
@@ -128,7 +332,7 @@ apiRoutes.get('/dashboard/summary', async (c) => {
     avg_rating: Number((avgRating?.avg as number || 0)).toFixed(1),
     positive_ratio: totalForRatio?.count ? Math.round(((positiveCount?.count as number || 0) / (totalForRatio?.count as number)) * 100) : 0,
     repeat_customer_ratio: totalCustomers?.count ? Math.round(((repeatCustomers?.count as number || 0) / (totalCustomers?.count as number)) * 100) : 0,
-    ai_quality_score: 9.2
+    ai_quality_score: avgQuality?.avg ? Number((avgQuality.avg as number).toFixed(1)) : 9.2
   })
 })
 
@@ -198,7 +402,6 @@ apiRoutes.get('/payments', async (c) => {
   return c.json({ payments: payments.results })
 })
 
-// ============ PAYMENT METHODS ============
 apiRoutes.get('/payment_methods', async (c) => {
   const db = c.env.DB
   const methods = await db.prepare('SELECT * FROM payment_methods WHERE user_id = 1').all()
@@ -251,3 +454,23 @@ apiRoutes.post('/admin/jobs/:id/retry', async (c) => {
   await db.prepare("UPDATE job_logs SET status = 'pending', retry_count = retry_count + 1 WHERE id = ?").bind(jobId).run()
   return c.json({ success: true })
 })
+
+// ============ TEMPLATE FALLBACK ============
+function getTemplateFallback(sentiment: string, customerName: string) {
+  const templates: Record<string, { text: string; score: number }[]> = {
+    positive: [
+      { text: `${customerName}님, 리뷰 남겨주셔서 감사합니다! 맛있게 드셨다니 정말 기쁘네요. 다음에도 맛있는 음식으로 보답하겠습니다 😊`, score: 7.5 },
+      { text: `${customerName}님 감사합니다! 만족하셨다니 보람차네요. 앞으로도 변함없는 맛으로 찾아뵙겠습니다!`, score: 7.3 },
+    ],
+    negative: [
+      { text: `${customerName}님, 불편을 드려 정말 죄송합니다. 말씀해주신 부분 꼭 개선하겠습니다. 다음엔 더 좋은 모습 보여드리겠습니다.`, score: 7.0 },
+      { text: `${customerName}님, 기대에 못 미쳐 죄송합니다. 소중한 의견 감사합니다. 더 나은 서비스를 위해 노력하겠습니다.`, score: 7.0 },
+    ],
+    neutral: [
+      { text: `${customerName}님, 리뷰 감사합니다! 더 나은 맛과 서비스로 찾아뵙겠습니다. 다음에도 찾아주세요!`, score: 7.2 },
+    ]
+  }
+
+  const options = templates[sentiment] || templates.neutral
+  return options[Math.floor(Math.random() * options.length)]
+}
