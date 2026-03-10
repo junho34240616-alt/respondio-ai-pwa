@@ -47,7 +47,7 @@ async function callGPT(
   systemPrompt: string,
   userPrompt: string,
   temperature = 0.7,
-  maxTokens = 500
+  maxTokens = 1000
 ): Promise<string> {
   const response = await fetch(`${config.baseUrl}/chat/completions`, {
     method: 'POST',
@@ -62,7 +62,7 @@ async function callGPT(
         { role: 'user', content: userPrompt }
       ],
       temperature,
-      max_tokens: maxTokens
+      max_completion_tokens: maxTokens
     })
   })
 
@@ -129,7 +129,7 @@ ${toneSample}
 
 답변만 작성해주세요. 다른 설명 없이 답변 텍스트만 출력하세요.`
 
-  const replyText = await callGPT(config, systemPrompt, userPrompt, 0.75, 300)
+  const replyText = await callGPT(config, systemPrompt, userPrompt, 0.75, 1000)
 
   // 품질 점수 산정
   const qualityScore = await evaluateQuality(config, context, replyText)
