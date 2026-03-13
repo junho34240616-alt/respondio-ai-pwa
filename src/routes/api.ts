@@ -570,6 +570,7 @@ apiRoutes.use('*', async (c, next) => {
   const path = c.req.path
 
   if (
+    path.endsWith('/health/public') ||
     path.endsWith('/auth/login') ||
     path.endsWith('/auth/signup') ||
     path.endsWith('/auth/refresh') ||
@@ -608,6 +609,52 @@ apiRoutes.use('*', async (c, next) => {
 
   c.set('auth_user', auth_user)
   await next()
+})
+
+apiRoutes.get('/health/public', async (c) => {
+  let db_ready = false
+  let db_error: string | null = null
+
+  try {
+    const table = await c.env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'users' LIMIT 1"
+    ).first<any>()
+    db_ready = !!table?.name
+  } catch (error: any) {
+    db_error = error?.message || 'db_check_failed'
+  }
+
+  let crawler_reachable = false
+  let crawler_status = null
+  let crawler_error: string | null = null
+
+  try {
+    const response = await fetch(`${get_crawler_base(c)}/health`)
+    if (response.ok) {
+      crawler_reachable = true
+      crawler_status = await response.json().catch(() => null)
+    } else {
+      crawler_error = `crawler_http_${response.status}`
+    }
+  } catch (error: any) {
+    crawler_error = error?.message || 'crawler_check_failed'
+  }
+
+  return c.json({
+    status: db_ready && crawler_reachable ? 'ok' : 'degraded',
+    app_base_url: get_app_base_url(c),
+    billing_mode: is_portone_server_configured(c) ? 'self_serve' : 'beta',
+    db: {
+      ready: db_ready,
+      error: db_error
+    },
+    crawler: {
+      base_url: get_crawler_base(c),
+      reachable: crawler_reachable,
+      error: crawler_error,
+      status: crawler_status
+    }
+  })
 })
 
 // ============ AUTH ============
