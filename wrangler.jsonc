@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "respondio-production",
-      "database_id": "local-dev-placeholder",
+      "database_id": "308805fa-a356-4626-ad34-c2a0dc1debac",
       "preview_database_id": "local-preview-placeholder"
     }
   ]
