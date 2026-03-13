@@ -45,6 +45,7 @@
 | `/auth/refresh` | POST | refresh token으로 access token 재발급 |
 | `/auth/logout` | POST | 로그아웃 및 세션 폐기 |
 | `/auth/me` | GET | 현재 로그인 사용자 조회 |
+| `/health/public` | GET | 공개 상태 점검 (DB / crawler / billing mode) |
 | `/reviews` | GET | 리뷰 목록 (필터: status, platform, sentiment) |
 | `/reviews/:id/generate` | POST | AI 답변 생성 (GPT/템플릿) |
 | `/reviews/:id/analyze` | POST | 감정 분석 |
@@ -145,6 +146,7 @@ npm run test:e2e
 - **웹앱/API**: Cloudflare Pages + Workers + D1
 - **크롤러**: 별도 Node.js 서버(Render/VPS/PM2 등)
 - **추후 필요 시 추가**: R2 for failure artifacts, Redis for queueing
+- **Render 배포 파일 포함**: `render.yaml`, `crawler/Dockerfile`
 
 ### Production Deploy Note
 - **로컬 smoke는 통과**: `wrangler pages dev` + D1 migration/seed + crawler 운영 경로 + browser E2E 확인
