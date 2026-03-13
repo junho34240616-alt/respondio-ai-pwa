@@ -61,6 +61,10 @@ Cloudflare Pages 대시보드에서 설정:
 목적:
 외부 Node crawler가 실제 웹앱과 안전하게 통신하게 합니다.
 
+권장 배포 방식:
+- Render Web Service
+- 이 저장소에는 `render.yaml`과 `crawler/Dockerfile`이 포함되어 있어 GitHub 저장소를 바로 연결할 수 있음
+
 필수값:
 - `WEBAPP_API=https://app.your-domain.com/api/v1`
 - `CRAWLER_SHARED_SECRET=<Cloudflare와 동일한 값>`
@@ -71,6 +75,10 @@ Cloudflare Pages 대시보드에서 설정:
 
 실서비스에서는:
 - `CRAWLER_TEST_MODE`를 비워두거나 제거
+
+Render에서는:
+- `PORT`는 Render가 자동 주입하므로 별도 입력하지 않아도 됨
+- `CRAWLER_PORT`는 비워둬도 동작함
 
 ## 5. PortOne 값 준비 (선택)
 
@@ -143,6 +151,7 @@ HOME=/tmp/respondio-wrangler-home npx wrangler pages deploy dist
 ## 9. 배포 후 확인
 
 확인 순서:
+0. `GET /api/v1/health/public` 이 `db.ready=true`, `crawler.reachable=true`를 반환하는지 확인
 1. 로그인 가능
 2. `/billing` 페이지가 무료 베타 안내 또는 결제 화면으로 정상 로드
 3. 플랫폼 연결 저장 가능
