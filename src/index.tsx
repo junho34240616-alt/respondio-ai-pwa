@@ -44,7 +44,8 @@ app.get('/', (c) => {
 })
 
 // ============ USER PAGES ============
-app.get('/login', (c) => c.html(loginPage()))
+app.get('/login', (c) => c.html(loginPage('login')))
+app.get('/signup', (c) => c.html(loginPage('signup')))
 app.get('/dashboard', (c) => c.html(dashboardPage(getPageOptions(c.env))))
 app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env))))
 app.get('/billing', (c) => c.html(billingPage(getPageOptions(c.env))))
@@ -548,7 +549,8 @@ function landingPage(options: PageOptions) {
 // ============================================================
 //  LOGIN PAGE
 // ============================================================
-function loginPage() {
+function loginPage(initialTab: 'login' | 'signup' = 'login') {
+  const isSignup = initialTab === 'signup'
   return `${baseHead('로그인')}
 <body class="bg-brand-50 min-h-screen flex items-center justify-center p-4">
   <div class="w-full max-w-md">
@@ -561,10 +563,10 @@ function loginPage() {
     </div>
     <div class="bg-white rounded-2xl shadow-xl p-8 border border-gray-100">
       <div class="flex bg-gray-100 rounded-xl p-1 mb-6">
-        <button id="tab-login" onclick="switchTab('login')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold bg-white shadow text-gray-900">로그인</button>
-        <button id="tab-signup" onclick="switchTab('signup')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold text-gray-500">회원가입</button>
+        <button id="tab-login" onclick="switchTab('login')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold ${isSignup ? 'text-gray-500' : 'bg-white shadow text-gray-900'}">로그인</button>
+        <button id="tab-signup" onclick="switchTab('signup')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold ${isSignup ? 'bg-white shadow text-gray-900' : 'text-gray-500'}">회원가입</button>
       </div>
-      <form id="form-login" onsubmit="handleLogin(event)">
+      <form id="form-login" class="${isSignup ? 'hidden' : ''}" onsubmit="handleLogin(event)">
         <div class="space-y-4">
           <div>
             <label class="text-sm font-medium text-gray-700 mb-1 block">이메일</label>
@@ -579,7 +581,7 @@ function loginPage() {
           </button>
         </div>
       </form>
-      <form id="form-signup" class="hidden" onsubmit="handleSignup(event)">
+      <form id="form-signup" class="${isSignup ? '' : 'hidden'}" onsubmit="handleSignup(event)">
         <div class="space-y-4">
           <div>
             <label class="text-sm font-medium text-gray-700 mb-1 block">이름</label>
@@ -633,6 +635,10 @@ function loginPage() {
 
     if (window.location.search.includes('demo=1')) {
       fillOwner();
+    }
+
+    if (window.location.pathname === '/signup') {
+      switchTab('signup');
     }
 
     function switchTab(tab) {
