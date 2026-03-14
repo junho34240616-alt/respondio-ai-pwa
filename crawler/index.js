@@ -56,9 +56,9 @@ const PLATFORMS = {
     loginUrl: 'https://self.baemin.com/login',
     reviewUrl: 'https://self.baemin.com/reviews',
     selectors: {
-      loginEmail: 'input[type="email"], input[name="email"], #email',
-      loginPassword: 'input[type="password"], input[name="password"], #password',
-      loginButton: 'button[type="submit"], .login-btn',
+      loginEmail: 'input[type="email"], input[name="email"], #email, input[name="id"], #id, input[aria-label="아이디 또는 전화번호"]',
+      loginPassword: 'input[type="password"], input[name="password"], #password, input[name="pw"], #pw, input[aria-label="비밀번호"]',
+      loginButton: 'button[type="submit"], .login-btn, #log\\.login, button.btn_login',
       reviewList: '.review-item, .review-card, [data-testid="review"]',
       reviewText: '.review-content, .review-text, .content',
       reviewRating: '.rating, .star-rating, [data-testid="rating"]',
@@ -74,9 +74,9 @@ const PLATFORMS = {
     loginUrl: 'https://store.coupangeats.com/login',
     reviewUrl: 'https://store.coupangeats.com/reviews',
     selectors: {
-      loginEmail: 'input[type="email"], input[name="email"]',
-      loginPassword: 'input[type="password"]',
-      loginButton: 'button[type="submit"]',
+      loginEmail: 'input[type="email"], input[name="email"], input[name="id"], input[name="username"], input[name="phone"], input[type="tel"], #email, #id, #phone, input[placeholder*="이메일"], input[placeholder*="아이디"], input[placeholder*="전화"]',
+      loginPassword: 'input[type="password"], input[name="password"], input[name="pw"], #password, #pw, input[placeholder*="비밀번호"], input[aria-label*="비밀번호"]',
+      loginButton: 'button[type="submit"], button:has-text("로그인"), button:has-text("다음"), [role="button"]:has-text("로그인")',
       reviewList: '.review-item, [class*="review"]',
       reviewText: '.review-content, [class*="content"]',
       reviewRating: '.rating, [class*="rating"]',
@@ -92,9 +92,9 @@ const PLATFORMS = {
     loginUrl: 'https://ceo.yogiyo.co.kr/login',
     reviewUrl: 'https://ceo.yogiyo.co.kr/reviews',
     selectors: {
-      loginEmail: 'input[type="email"], input[name="id"]',
-      loginPassword: 'input[type="password"]',
-      loginButton: 'button[type="submit"]',
+      loginEmail: 'input[type="email"], input[name="id"], input[name="email"], input[name="phone"], input[type="tel"], #id, #email, #phone, input[id^="field-"]:not([type="password"]), input[placeholder*="전화번호"], input[placeholder*="휴대폰"], input[placeholder*="아이디"], input[aria-label*="전화"], input[aria-label*="휴대폰"], input[aria-label*="아이디"]',
+      loginPassword: 'input[type="password"], input[name="password"], input[name="pw"], #password, #pw, input[id^="field-"][type="password"], input[placeholder*="비밀번호"], input[aria-label*="비밀번호"]',
+      loginButton: 'button[type="submit"], button:has-text("로그인"), button:has-text("다음"), [role="button"]:has-text("로그인")',
       reviewList: '.review-item, [class*="review"]',
       reviewText: '.content, [class*="content"]',
       reviewRating: '.rating, [class*="star"]',
@@ -110,40 +110,101 @@ const PLATFORMS = {
 // ============================================================
 //  BROWSER MANAGEMENT
 // ============================================================
-let globalBrowser = null;
+const launchArgs = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage'
+];
 
-async function getBrowser() {
-  if (!globalBrowser || !globalBrowser.isConnected()) {
-    globalBrowser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process'
-      ]
-    });
-  }
-  return globalBrowser;
+function isSessionActive(session) {
+  return !!(
+    session &&
+    session.browser &&
+    session.browser.isConnected &&
+    session.browser.isConnected() &&
+    session.page &&
+    typeof session.page.isClosed === 'function' &&
+    !session.page.isClosed()
+  );
 }
 
-async function getContext(platform) {
+async function closePlatformSession(platform) {
   const session = platformSessions.get(platform);
-  if (session && session.context) {
-    return session;
-  }
+  if (!session) return;
 
-  const browser = await getBrowser();
+  platformSessions.delete(platform);
+
+  try {
+    await session.page?.close();
+  } catch (error) {}
+
+  try {
+    await session.context?.close();
+  } catch (error) {}
+
+  try {
+    await session.browser?.close();
+  } catch (error) {}
+}
+
+async function createPlatformSession(platform) {
+  const browser = await chromium.launch({
+    headless: true,
+    chromiumSandbox: false,
+    args: launchArgs
+  });
+
+  browser.on('disconnected', () => {
+    const current = platformSessions.get(platform);
+    if (current && current.browser === browser) {
+      platformSessions.delete(platform);
+    }
+  });
+
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     viewport: { width: 1280, height: 720 }
   });
-  
+
   const page = await context.newPage();
+  page.setDefaultTimeout(15000);
+  page.setDefaultNavigationTimeout(30000);
+
   const sessionData = { browser, context, page, loggedIn: false, lastActivity: Date.now() };
   platformSessions.set(platform, sessionData);
   return sessionData;
+}
+
+async function getContext(platform, options = {}) {
+  const { fresh = false } = options;
+  const existing = platformSessions.get(platform);
+
+  if (fresh && existing) {
+    await closePlatformSession(platform);
+  } else if (isSessionActive(existing)) {
+    return existing;
+  } else if (existing) {
+    await closePlatformSession(platform);
+  }
+
+  return createPlatformSession(platform);
+}
+
+async function waitForVisibleSelector(page, selector, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const locator = page.locator(selector).first();
+    try {
+      if (await locator.isVisible({ timeout: 500 })) {
+        return locator;
+      }
+    } catch (error) {
+      // Keep polling while the login flow redirects between providers.
+    }
+    await page.waitForTimeout(250);
+  }
+
+  throw new Error(`Timeout ${timeout}ms exceeded while waiting for selector: ${selector}`);
 }
 
 // ============================================================
@@ -175,31 +236,34 @@ async function loginPlatform(platform, credentials) {
     };
   }
 
-  const session = await getContext(platform);
+  const session = await getContext(platform, { fresh: true });
   const { page } = session;
 
   try {
     console.log(`[${config.name}] 로그인 시도...`);
     
-    await page.goto(config.loginUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(config.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
     
-    // 이메일 입력
-    await page.waitForSelector(config.selectors.loginEmail, { timeout: 10000 });
-    await page.fill(config.selectors.loginEmail, credentials.email);
+    // 로그인 아이디 입력
+    const emailInput = await waitForVisibleSelector(page, config.selectors.loginEmail, 20000);
+    await emailInput.fill(credentials.email);
     
     // 비밀번호 입력
-    await page.fill(config.selectors.loginPassword, credentials.password);
+    const passwordInput = await waitForVisibleSelector(page, config.selectors.loginPassword, 10000);
+    await passwordInput.fill(credentials.password);
     
     // 로그인 버튼 클릭
-    await page.click(config.selectors.loginButton);
+    const loginButton = await waitForVisibleSelector(page, config.selectors.loginButton, 10000);
+    await loginButton.click();
     
     // 페이지 전환 대기
     await page.waitForNavigation({ timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(3000);
     
     // 로그인 성공 확인 (URL이 login이 아닌지)
     const currentUrl = page.url();
-    session.loggedIn = !currentUrl.includes('login');
+    session.loggedIn = !currentUrl.includes('login') && !currentUrl.includes('nid.naver.com/nidlogin');
     session.lastActivity = Date.now();
     
     console.log(`[${config.name}] 로그인 ${session.loggedIn ? '성공' : '실패'}: ${currentUrl}`);
@@ -207,15 +271,17 @@ async function loginPlatform(platform, credentials) {
     return {
       success: session.loggedIn,
       platform,
-      message: session.loggedIn ? '로그인 성공' : '로그인 실패 - 크리덴셜 확인 필요'
+      message: session.loggedIn ? '로그인 성공' : `로그인 실패 - 크리덴셜 또는 추가 인증 상태 확인 필요 (${currentUrl})`
     };
   } catch (error) {
-    console.error(`[${config.name}] 로그인 에러:`, error.message);
+    const currentUrl = page.url();
+    console.error(`[${config.name}] 로그인 에러:`, error.message, currentUrl);
     session.loggedIn = false;
+    await closePlatformSession(platform);
     return {
       success: false,
       platform,
-      message: `로그인 에러: ${error.message}`
+      message: `로그인 에러 (${currentUrl}): ${error.message}`
     };
   }
 }
@@ -230,9 +296,18 @@ async function fetchReviews(platform, storeId, options = {}) {
   const session = platformSessions.get(platform);
   
   // 데모 모드: 실제 크롤링 없이 시뮬레이션 데이터 반환
-  if (options.demo || !session?.loggedIn) {
+  if (options.demo) {
     console.log(`[${config.name}] 데모 모드로 리뷰 수집 시뮬레이션`);
     return generateDemoReviews(platform, storeId);
+  }
+
+  if (!isSessionActive(session) || !session?.loggedIn) {
+    return {
+      success: false,
+      platform,
+      error: '플랫폼 운영 세션이 연결되어 있지 않습니다. 설정 화면에서 계정 연결을 다시 시도해주세요.',
+      reviews: []
+    };
   }
 
   if (CRAWLER_TEST_MODE) {
@@ -283,6 +358,7 @@ async function fetchReviews(platform, storeId, options = {}) {
     };
   } catch (error) {
     console.error(`[${config.name}] 리뷰 수집 에러:`, error.message);
+    await closePlatformSession(platform);
     return {
       success: false,
       platform,
@@ -302,14 +378,13 @@ async function postReply(platform, reviewId, replyText) {
   const session = platformSessions.get(platform);
   
   // 데모 모드
-  if (!session?.loggedIn) {
-    console.log(`[${config.name}] 데모 모드: 답변 게시 시뮬레이션 (review: ${reviewId})`);
+  if (!isSessionActive(session) || !session?.loggedIn) {
+    console.log(`[${config.name}] 운영 세션이 없어 답변 게시를 중단합니다. (review: ${reviewId})`);
     return {
-      success: true,
+      success: false,
       platform,
       review_id: reviewId,
-      message: '답변 게시 완료 (데모)',
-      posted_at: new Date().toISOString()
+      error: '플랫폼 운영 세션이 연결되어 있지 않습니다. 설정 화면에서 계정 연결을 다시 시도해주세요.'
     };
   }
 
@@ -354,6 +429,7 @@ async function postReply(platform, reviewId, replyText) {
     };
   } catch (error) {
     console.error(`[${config.name}] 답변 게시 에러:`, error.message);
+    await closePlatformSession(platform);
     return {
       success: false,
       platform,
@@ -485,7 +561,7 @@ app.get('/health', (req, res) => {
     mode: CRAWLER_TEST_MODE ? 'test' : 'live',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
-    browser: globalBrowser?.isConnected() ? 'connected' : 'disconnected',
+    browser: Array.from(platformSessions.values()).some((session) => isSessionActive(session)) ? 'connected' : 'disconnected',
     sessions,
     jobs: {
       active: crawlJobs.filter(j => j.status === 'running').length,
@@ -689,14 +765,9 @@ app.post('/auto-sync/stop', (req, res) => {
 // ============================================================
 async function cleanup() {
   console.log('Cleaning up browser sessions...');
-  for (const [platform, session] of platformSessions) {
-    try {
-      await session.context?.close();
-    } catch (e) {}
+  for (const platform of Array.from(platformSessions.keys())) {
+    await closePlatformSession(platform);
   }
-  try {
-    await globalBrowser?.close();
-  } catch (e) {}
 }
 
 process.on('SIGINT', async () => { await cleanup(); process.exit(0); });
