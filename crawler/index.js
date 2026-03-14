@@ -207,6 +207,326 @@ async function waitForVisibleSelector(page, selector, timeout = 15000) {
   throw new Error(`Timeout ${timeout}ms exceeded while waiting for selector: ${selector}`);
 }
 
+function safeText(value) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value.trim();
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value).trim();
+  return '';
+}
+
+function parseNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[^0-9.]/g, '');
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  return 0;
+}
+
+function firstNonEmpty(...values) {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      const text = normalizeMenuItems(value);
+      if (text) return text;
+      continue;
+    }
+    const text = safeText(value);
+    if (text) return text;
+  }
+  return '';
+}
+
+function normalizeMenuItems(value) {
+  if (!value) return '';
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item.trim();
+        if (!item || typeof item !== 'object') return '';
+
+        const name = firstNonEmpty(
+          item.name,
+          item.menu_name,
+          item.title,
+          item.display_name,
+          item.option_name
+        );
+        const quantity = firstNonEmpty(item.quantity, item.count, item.qty);
+        if (!name) return '';
+        return quantity ? `${name} x${quantity}` : name;
+      })
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  if (typeof value === 'object') {
+    return normalizeMenuItems(
+      value.menu_items ||
+      value.menus ||
+      value.order_items ||
+      value.items ||
+      value.orders
+    );
+  }
+
+  return safeText(value);
+}
+
+function extractYogiyoVendorId(input) {
+  const source = safeText(input);
+  const match = source.match(/\/vendor\/(\d+)\/reviews(?:\/v2\/|\/info\/)/);
+  return match ? match[1] : '';
+}
+
+function normalizeYogiyoReviewItem(item, storeId) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+
+  const reviewNode =
+    item.review ||
+    item.customer_review ||
+    item.review_data ||
+    item.owner_review ||
+    null;
+
+  const reviewText = firstNonEmpty(
+    item.review_text,
+    item.review_comment,
+    item.comment,
+    item.content,
+    item.contents,
+    item.text,
+    reviewNode?.review_text,
+    reviewNode?.comment,
+    reviewNode?.content,
+    reviewNode?.contents,
+    reviewNode?.text
+  );
+
+  if (!reviewText) {
+    return null;
+  }
+
+  const rating = parseNumber(
+    firstNonEmpty(
+      item.rating,
+      item.score,
+      item.star,
+      item.star_point,
+      reviewNode?.rating,
+      reviewNode?.score,
+      reviewNode?.star,
+      reviewNode?.star_point
+    )
+  );
+
+  const platformReviewId = firstNonEmpty(
+    item.review_id,
+    item.id,
+    item.pk,
+    item.reviewPk,
+    reviewNode?.review_id,
+    reviewNode?.id,
+    reviewNode?.pk
+  );
+
+  const customerName = firstNonEmpty(
+    item.customer_name,
+    item.nickname,
+    item.name,
+    item.reviewer_name,
+    item.writer_name,
+    item.user_name,
+    reviewNode?.customer_name,
+    reviewNode?.nickname,
+    reviewNode?.name
+  ) || '고객';
+
+  const menuItems = normalizeMenuItems(
+    item.menu_items ||
+    item.menu_names ||
+    item.menus ||
+    item.ordered_menus ||
+    item.order_items ||
+    item.order_menu_list ||
+    reviewNode?.menu_items ||
+    reviewNode?.menus
+  );
+
+  const reviewDate = firstNonEmpty(
+    item.review_date,
+    item.created_at,
+    item.created,
+    item.registered_at,
+    item.reg_date,
+    item.date,
+    reviewNode?.review_date,
+    reviewNode?.created_at,
+    reviewNode?.created
+  ) || new Date().toISOString();
+
+  const hasReply =
+    item.has_reply === true ||
+    item.replied === true ||
+    item.reply_status === 'completed' ||
+    item.reply_status === 'done' ||
+    item.reply_status === 'replied' ||
+    !!item.owner_reply ||
+    !!item.reply ||
+    (Array.isArray(item.replies) && item.replies.length > 0) ||
+    !!reviewNode?.owner_reply ||
+    !!reviewNode?.reply;
+
+  return {
+    platform_review_id: platformReviewId || `yogiyo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    customer_name: customerName,
+    rating: rating || 4,
+    review_text: reviewText,
+    menu_items: menuItems,
+    review_date: reviewDate,
+    platform: 'yogiyo',
+    store_id: storeId,
+    has_reply: hasReply
+  };
+}
+
+function extractYogiyoReviewsFromPayload(payload, storeId) {
+  const visited = new Set();
+  let bestMatch = [];
+
+  function visit(node) {
+    if (!node || typeof node !== 'object') return;
+    if (visited.has(node)) return;
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      const normalized = node
+        .map((item) => normalizeYogiyoReviewItem(item, storeId))
+        .filter(Boolean);
+
+      const unanswered = normalized.filter((item) => !item.has_reply);
+      const candidate = unanswered.length ? unanswered : normalized;
+      if (candidate.length > bestMatch.length) {
+        bestMatch = candidate;
+      }
+
+      for (const item of node) {
+        visit(item);
+      }
+      return;
+    }
+
+    for (const value of Object.values(node)) {
+      visit(value);
+    }
+  }
+
+  visit(payload);
+
+  const seen = new Set();
+  return bestMatch
+    .filter((review) => {
+      const key = `${review.platform_review_id}:${review.review_text}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(({ has_reply, ...review }) => review);
+}
+
+async function collectYogiyoReviewsViaApi(page, storeId, reviewUrl) {
+  const observedResponses = [];
+  const listener = (response) => {
+    const url = response.url();
+    if (
+      url.includes('ceo-api.yogiyo.co.kr') &&
+      (url.includes('/reviews/v2/') || url.includes('/reviews/info/'))
+    ) {
+      observedResponses.push(response);
+    }
+  };
+
+  page.on('response', listener);
+  try {
+    await page.goto(reviewUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      if (observedResponses.some((response) => response.url().includes('/reviews/v2/'))) {
+        break;
+      }
+      await page.waitForTimeout(250);
+    }
+  } finally {
+    page.off('response', listener);
+  }
+
+  let vendorId = '';
+  const observedUrls = observedResponses.map((response) => response.url());
+
+  for (const response of observedResponses) {
+    vendorId = vendorId || extractYogiyoVendorId(response.url());
+    if (!response.url().includes('/reviews/v2/')) {
+      continue;
+    }
+
+    const payload = await response.json().catch(() => null);
+    const reviews = extractYogiyoReviewsFromPayload(payload, storeId);
+    if (reviews.length > 0) {
+      return {
+        reviews,
+        source: response.url(),
+        vendorId,
+        observedUrls
+      };
+    }
+  }
+
+  if (vendorId) {
+    const manualFetch = await page.evaluate(async (resolvedVendorId) => {
+      try {
+        const response = await fetch(`https://ceo-api.yogiyo.co.kr/vendor/${resolvedVendorId}/reviews/v2/`, {
+          method: 'GET',
+          credentials: 'include'
+        });
+        return {
+          ok: response.ok,
+          status: response.status,
+          url: response.url,
+          payload: await response.json().catch(() => null)
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          status: 0,
+          url: `https://ceo-api.yogiyo.co.kr/vendor/${resolvedVendorId}/reviews/v2/`,
+          error: error.message
+        };
+      }
+    }, vendorId);
+
+    if (manualFetch?.ok) {
+      const reviews = extractYogiyoReviewsFromPayload(manualFetch.payload, storeId);
+      if (reviews.length > 0) {
+        return {
+          reviews,
+          source: manualFetch.url,
+          vendorId,
+          observedUrls
+        };
+      }
+    }
+  }
+
+  return {
+    reviews: [],
+    source: '',
+    vendorId,
+    observedUrls
+  };
+}
+
 // ============================================================
 //  CORE CRAWLING FUNCTIONS
 // ============================================================
@@ -319,7 +639,34 @@ async function fetchReviews(platform, storeId, options = {}) {
   
   try {
     console.log(`[${config.name}] 리뷰 페이지 접속...`);
-    await page.goto(config.reviewUrl, { waitUntil: 'networkidle', timeout: 30000 });
+
+    if (platform === 'yogiyo') {
+      const apiResult = await collectYogiyoReviewsViaApi(page, storeId, config.reviewUrl);
+      if (apiResult.reviews.length > 0) {
+        session.lastActivity = Date.now();
+        console.log(
+          `[${config.name}] ${apiResult.reviews.length}건의 리뷰 수집 완료 (API: ${apiResult.source || 'unknown'})`
+        );
+        return {
+          success: true,
+          platform,
+          store_id: storeId,
+          reviews: apiResult.reviews,
+          fetched_at: new Date().toISOString(),
+          count: apiResult.reviews.length
+        };
+      }
+
+      console.warn(
+        `[${config.name}] API 리뷰 응답에서 데이터를 찾지 못했습니다. DOM fallback 시도`,
+        {
+          vendorId: apiResult.vendorId || null,
+          observedUrls: apiResult.observedUrls
+        }
+      );
+    } else {
+      await page.goto(config.reviewUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    }
     
     // 리뷰 목록 대기
     await page.waitForSelector(config.selectors.reviewList, { timeout: 15000 });
@@ -357,12 +704,12 @@ async function fetchReviews(platform, storeId, options = {}) {
       count: reviews.length
     };
   } catch (error) {
-    console.error(`[${config.name}] 리뷰 수집 에러:`, error.message);
+    console.error(`[${config.name}] 리뷰 수집 에러:`, error.message, page.url());
     await closePlatformSession(platform);
     return {
       success: false,
       platform,
-      error: error.message,
+      error: `${error.message} (${page.url()})`,
       reviews: []
     };
   }
