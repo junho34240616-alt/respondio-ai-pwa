@@ -1116,9 +1116,49 @@ function reviewsPage(options: PageOptions) {
 
     apiFetch('/api/v1/platform_connections').then(r=>r.json()).then(data => {
       platformConnections = data.connections || [];
-      const hasLiveConnection = platformConnections.some(c => c.connection_status === 'connected' && c.has_credentials);
+      const connectedPlatforms = getLiveReadyPlatforms();
+      const hasLiveConnection = connectedPlatforms.length > 0;
       document.getElementById('sync-mode').value = hasLiveConnection ? 'live' : 'demo';
+      updateSyncButtonLabel(connectedPlatforms);
     }).catch(() => {});
+
+    function getLiveReadyPlatforms() {
+      return platformConnections
+        .filter(c => c.connection_status === 'connected' && c.has_credentials)
+        .map(c => c.platform);
+    }
+
+    function getPlatformLabel(platform) {
+      const labels = {
+        baemin: '배달의민족',
+        coupang_eats: '쿠팡이츠',
+        yogiyo: '요기요'
+      };
+      return labels[platform] || platform;
+    }
+
+    function updateSyncButtonLabel(connectedPlatforms) {
+      const syncModeEl = document.getElementById('sync-mode');
+      const btn = document.getElementById('btn-sync');
+      if (!syncModeEl || !btn) return;
+
+      const isLive = syncModeEl.value === 'live';
+      if (!isLive) {
+        btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>리뷰 수집';
+        return;
+      }
+
+      if (!connectedPlatforms.length) {
+        btn.innerHTML = '<i class="fas fa-link-slash mr-2"></i>연결 필요';
+        return;
+      }
+
+      btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>' + connectedPlatforms.map(getPlatformLabel).join(', ') + ' 수집';
+    }
+
+    document.getElementById('sync-mode').addEventListener('change', function() {
+      updateSyncButtonLabel(getLiveReadyPlatforms());
+    });
 
     function renderReviews(reviews) {
       const container = document.getElementById('review-list');
@@ -1221,13 +1261,22 @@ function reviewsPage(options: PageOptions) {
       const btn = document.getElementById('btn-sync');
       const syncMode = document.getElementById('sync-mode').value;
       const demo = syncMode !== 'live';
+      const livePlatforms = getLiveReadyPlatforms();
+      const targetPlatforms = demo ? ['baemin', 'coupang_eats', 'yogiyo'] : livePlatforms;
+
+      if (!demo && !targetPlatforms.length) {
+        alert('실제 수집을 하려면 설정 화면에서 먼저 연결된 플랫폼이 1개 이상 있어야 합니다.');
+        return;
+      }
+
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>수집 중...';
       try {
-        // 3개 플랫폼 순차 수집
         let totalInserted = 0;
         let totalFailed = 0;
-        for (const platform of ['baemin', 'coupang_eats', 'yogiyo']) {
+        const failures = [];
+
+        for (const platform of targetPlatforms) {
           try {
             const res = await apiFetch('/api/v1/reviews/sync', {
               method: 'POST',
@@ -1235,19 +1284,31 @@ function reviewsPage(options: PageOptions) {
             });
             const data = await res.json();
             if (data.inserted) totalInserted += data.inserted;
-            if (!data.success) totalFailed += 1;
+            if (!data.success) {
+              totalFailed += 1;
+              const errorMessage = Array.isArray(data.results) && data.results[0]?.error
+                ? data.results[0].error
+                : data?.error?.message || '수집 실패';
+              failures.push(getPlatformLabel(platform) + ': ' + errorMessage);
+            }
           } catch(e) { console.error(platform, e); }
         }
         if (totalInserted > 0) {
-          alert(totalInserted + '건의 새 리뷰가 수집되었습니다!');
+          const summary = demo
+            ? totalInserted + '건의 새 리뷰가 수집되었습니다!'
+            : totalInserted + '건의 새 리뷰가 수집되었습니다!\\n실행 플랫폼: ' + targetPlatforms.map(getPlatformLabel).join(', ');
+          alert(summary);
           location.reload();
         } else if (!demo && totalFailed > 0) {
-          alert('실제 수집에 실패했습니다. 설정 페이지에서 플랫폼 계정 연결 상태를 먼저 확인해주세요.');
+          alert('실제 수집에 실패한 플랫폼이 있습니다.\\n\\n' + failures.join('\\n\\n'));
         } else {
           alert('새로운 리뷰가 없거나 크롤러 서버가 실행 중이 아닙니다.\\n\\n크롤러 시작: pm2 start crawler/ecosystem.config.cjs');
         }
       } catch(e) { alert('리뷰 수집 실패: ' + e.message); }
-      finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>리뷰 수집'; }
+      finally {
+        btn.disabled = false;
+        updateSyncButtonLabel(getLiveReadyPlatforms());
+      }
     }
     function applyFilter() {}
     function resetFilters() { renderReviews(allReviews); }
