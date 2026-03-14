@@ -55,10 +55,14 @@ const PLATFORMS = {
     name: '배달의민족',
     loginUrl: 'https://self.baemin.com/login',
     reviewUrl: 'https://self.baemin.com/reviews',
+    fallbackLoginUrls: [
+      'https://self.baemin.com/bridge',
+      'https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fself.baemin.com%2Fbridge'
+    ],
     selectors: {
-      loginEmail: 'input[type="email"], input[name="email"], #email, input[name="id"], #id, input[aria-label="아이디 또는 전화번호"]',
+      loginEmail: 'input[type="email"], input[name="email"], #email, input[name="id"], #id, input[aria-label="아이디 또는 전화번호"], input[placeholder*="아이디"], input[placeholder*="전화번호"], input[autocomplete="username"]',
       loginPassword: 'input[type="password"], input[name="password"], #password, input[name="pw"], #pw, input[aria-label="비밀번호"]',
-      loginButton: 'button[type="submit"], .login-btn, #log\\.login, button.btn_login',
+      loginButton: 'button[type="submit"], .login-btn, #log\\.login, button.btn_login, input[type="submit"], button:has-text("로그인"), button:has-text("다음"), a:has-text("네이버")',
       reviewList: '.review-item, .review-card, [data-testid="review"]',
       reviewText: '.review-content, .review-text, .content',
       reviewRating: '.rating, .star-rating, [data-testid="rating"]',
@@ -73,10 +77,14 @@ const PLATFORMS = {
     name: '쿠팡이츠',
     loginUrl: 'https://store.coupangeats.com/login',
     reviewUrl: 'https://store.coupangeats.com/reviews',
+    fallbackLoginUrls: [
+      'https://store.coupangeats.com/merchant/app',
+      'https://store.coupangeats.com/merchant/app/fee'
+    ],
     selectors: {
-      loginEmail: 'input[type="email"], input[name="email"], input[name="id"], input[name="username"], input[name="phone"], input[type="tel"], #email, #id, #phone, input[placeholder*="이메일"], input[placeholder*="아이디"], input[placeholder*="전화"]',
+      loginEmail: 'input[type="email"], input[name="email"], input[name="id"], input[name="username"], input[name="phone"], input[type="tel"], input[type="text"], #email, #id, #phone, input[placeholder*="이메일"], input[placeholder*="아이디"], input[placeholder*="전화"], input[autocomplete="username"]',
       loginPassword: 'input[type="password"], input[name="password"], input[name="pw"], #password, #pw, input[placeholder*="비밀번호"], input[aria-label*="비밀번호"]',
-      loginButton: 'button[type="submit"], button:has-text("로그인"), button:has-text("다음"), [role="button"]:has-text("로그인")',
+      loginButton: 'button[type="submit"], button:has-text("로그인"), button:has-text("다음"), [role="button"]:has-text("로그인"), input[type="submit"]',
       reviewList: '.review-item, [class*="review"]',
       reviewText: '.review-content, [class*="content"]',
       reviewRating: '.rating, [class*="rating"]',
@@ -163,7 +171,11 @@ async function createPlatformSession(platform) {
 
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 720 }
+    viewport: { width: 1280, height: 720 },
+    locale: 'ko-KR',
+    extraHTTPHeaders: {
+      'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
   });
 
   const page = await context.newPage();
@@ -205,6 +217,205 @@ async function waitForVisibleSelector(page, selector, timeout = 15000) {
   }
 
   throw new Error(`Timeout ${timeout}ms exceeded while waiting for selector: ${selector}`);
+}
+
+function getAllFrames(page) {
+  const main = page.mainFrame();
+  return [main, ...page.frames().filter((frame) => frame !== main)];
+}
+
+async function waitForVisibleSelectorInFrames(page, selector, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    for (const frame of getAllFrames(page)) {
+      const locator = frame.locator(selector).first();
+      try {
+        if (await locator.isVisible({ timeout: 400 })) {
+          return { frame, locator, selector };
+        }
+      } catch (error) {
+        // Keep polling while auth pages redirect or replace iframes.
+      }
+    }
+    await page.waitForTimeout(250);
+  }
+
+  throw new Error(`Timeout ${timeout}ms exceeded while waiting for selector: ${selector}`);
+}
+
+async function probeVisibleSelectorInFrames(page, selector, timeout = 1500) {
+  try {
+    return await waitForVisibleSelectorInFrames(page, selector, timeout);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function getFrameDomSummary(frame) {
+  try {
+    return await frame.evaluate(() => {
+      const pick = (elements, mapper, limit = 8) =>
+        Array.from(elements)
+          .map(mapper)
+          .filter(Boolean)
+          .slice(0, limit);
+
+      const inputs = pick(document.querySelectorAll('input, textarea'), (el) => {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return null;
+        return {
+          tag: el.tagName.toLowerCase(),
+          type: el.getAttribute('type') || '',
+          name: el.getAttribute('name') || '',
+          id: el.getAttribute('id') || '',
+          placeholder: el.getAttribute('placeholder') || '',
+          autocomplete: el.getAttribute('autocomplete') || '',
+          ariaLabel: el.getAttribute('aria-label') || ''
+        };
+      });
+
+      const buttons = pick(document.querySelectorAll('button, input[type="submit"], a, [role="button"]'), (el) => {
+        const style = window.getComputedStyle(el);
+        const text = (el.textContent || el.getAttribute('value') || '').trim();
+        if (style.display === 'none' || style.visibility === 'hidden' || !text) return null;
+        return {
+          tag: el.tagName.toLowerCase(),
+          type: el.getAttribute('type') || '',
+          id: el.getAttribute('id') || '',
+          text: text.slice(0, 80)
+        };
+      });
+
+      const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+      return {
+        title: document.title || '',
+        bodyText,
+        inputs,
+        buttons
+      };
+    });
+  } catch (error) {
+    return {
+      title: '',
+      bodyText: '',
+      inputs: [],
+      buttons: [],
+      error: error.message
+    };
+  }
+}
+
+async function getPageDiagnostics(page) {
+  const frameSummaries = [];
+  for (const frame of getAllFrames(page)) {
+    const summary = await getFrameDomSummary(frame);
+    frameSummaries.push({
+      url: frame.url(),
+      ...summary
+    });
+  }
+
+  return {
+    currentUrl: page.url(),
+    frameCount: frameSummaries.length,
+    frames: frameSummaries
+  };
+}
+
+function formatPageDiagnostics(diagnostics) {
+  const parts = [
+    `url=${diagnostics.currentUrl}`,
+    `frames=${diagnostics.frameCount}`
+  ];
+
+  diagnostics.frames.slice(0, 3).forEach((frame, index) => {
+    const inputs = (frame.inputs || [])
+      .map((input) => {
+        const details = [input.tag, input.type, input.name, input.id, input.placeholder, input.ariaLabel]
+          .filter(Boolean)
+          .join('/');
+        return details || input.tag;
+      })
+      .join('; ');
+
+    const buttons = (frame.buttons || [])
+      .map((button) => button.text || button.id || button.tag)
+      .join('; ');
+
+    parts.push(
+      `frame${index + 1}=${frame.url}`,
+      frame.title ? `title=${frame.title}` : '',
+      frame.bodyText ? `body=${frame.bodyText}` : '',
+      inputs ? `inputs=${inputs}` : '',
+      buttons ? `buttons=${buttons}` : ''
+    );
+  });
+
+  return parts.filter(Boolean).join(' | ');
+}
+
+function isLoginSuccessUrl(platform, currentUrl) {
+  if (!currentUrl) return false;
+
+  const normalized = currentUrl.toLowerCase();
+  if (platform === 'baemin') {
+    return (
+      normalized.includes('self.baemin.com') &&
+      !normalized.includes('/login') &&
+      !normalized.includes('nid.naver.com/nidlogin')
+    );
+  }
+
+  if (platform === 'coupang_eats') {
+    return normalized.includes('store.coupangeats.com') && !normalized.includes('/login');
+  }
+
+  return !normalized.includes('login');
+}
+
+async function hasVisibleLoginSurface(page, config) {
+  const probes = [
+    config.selectors.loginEmail,
+    config.selectors.loginPassword,
+    config.selectors.loginButton
+  ];
+
+  for (const selector of probes) {
+    const found = await probeVisibleSelectorInFrames(page, selector, 1200);
+    if (found) return true;
+  }
+
+  return false;
+}
+
+async function openLoginSurface(platform, page, config) {
+  const loginUrls = [config.loginUrl, ...(config.fallbackLoginUrls || [])].filter(Boolean);
+
+  for (const candidateUrl of loginUrls) {
+    await page.goto(candidateUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(2000);
+
+    if (await hasVisibleLoginSurface(page, config)) {
+      return;
+    }
+  }
+}
+
+async function findLoginField(page, primarySelector, fallbackSelectors, timeout) {
+  const selectors = [primarySelector, ...fallbackSelectors];
+  const deadline = Date.now() + timeout;
+
+  while (Date.now() < deadline) {
+    for (const selector of selectors) {
+      const found = await probeVisibleSelectorInFrames(page, selector, 900);
+      if (found) {
+        return found;
+      }
+    }
+    await page.waitForTimeout(250);
+  }
+
+  throw new Error(`Timeout ${timeout}ms exceeded while waiting for selectors: ${selectors.join(' || ')}`);
 }
 
 function safeText(value) {
@@ -435,6 +646,220 @@ function extractYogiyoReviewsFromPayload(payload, storeId) {
     .map(({ has_reply, ...review }) => review);
 }
 
+function normalizeGenericReviewItem(item, platform, storeId) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+
+  const nestedReview =
+    item.review ||
+    item.review_data ||
+    item.customer_review ||
+    item.reviewInfo ||
+    item.orderReview ||
+    item.reviewContent ||
+    null;
+
+  const reviewText = firstNonEmpty(
+    item.review_text,
+    item.review_comment,
+    item.comment,
+    item.content,
+    item.contents,
+    item.text,
+    item.message,
+    nestedReview?.review_text,
+    nestedReview?.comment,
+    nestedReview?.content,
+    nestedReview?.contents,
+    nestedReview?.text,
+    nestedReview?.message
+  );
+
+  if (!reviewText) {
+    return null;
+  }
+
+  const platformReviewId = firstNonEmpty(
+    item.review_id,
+    item.reviewId,
+    item.order_review_id,
+    item.orderReviewId,
+    item.id,
+    item.pk,
+    nestedReview?.review_id,
+    nestedReview?.reviewId,
+    nestedReview?.id,
+    nestedReview?.pk
+  );
+
+  const customerName = firstNonEmpty(
+    item.customer_name,
+    item.customerName,
+    item.nickname,
+    item.name,
+    item.reviewer_name,
+    item.writer_name,
+    item.user_name,
+    item.memberName,
+    nestedReview?.customer_name,
+    nestedReview?.customerName,
+    nestedReview?.nickname,
+    nestedReview?.name
+  ) || '고객';
+
+  const rating = parseNumber(
+    firstNonEmpty(
+      item.rating,
+      item.score,
+      item.star,
+      item.stars,
+      item.point,
+      nestedReview?.rating,
+      nestedReview?.score,
+      nestedReview?.star,
+      nestedReview?.stars
+    )
+  );
+
+  const menuItems = normalizeMenuItems(
+    item.menu_items ||
+    item.menu_names ||
+    item.menus ||
+    item.order_items ||
+    item.order_menu_list ||
+    item.ordered_menus ||
+    item.items ||
+    nestedReview?.menu_items ||
+    nestedReview?.menus
+  );
+
+  const reviewDate = firstNonEmpty(
+    item.review_date,
+    item.created_at,
+    item.created,
+    item.registered_at,
+    item.reg_date,
+    item.date,
+    nestedReview?.review_date,
+    nestedReview?.created_at,
+    nestedReview?.created
+  ) || new Date().toISOString();
+
+  const hasReply =
+    item.has_reply === true ||
+    item.replied === true ||
+    item.reply_status === 'completed' ||
+    item.reply_status === 'done' ||
+    item.reply_status === 'replied' ||
+    !!item.reply ||
+    !!item.owner_reply ||
+    !!item.reply_content ||
+    (Array.isArray(item.replies) && item.replies.length > 0) ||
+    !!nestedReview?.reply ||
+    !!nestedReview?.owner_reply;
+
+  return {
+    platform_review_id: platformReviewId || `${platform}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    customer_name: customerName,
+    rating: rating || 4,
+    review_text: reviewText,
+    menu_items: menuItems,
+    review_date: reviewDate,
+    platform,
+    store_id: storeId,
+    has_reply: hasReply
+  };
+}
+
+function extractGenericReviewsFromPayload(payload, platform, storeId) {
+  const visited = new Set();
+  let bestMatch = [];
+
+  function visit(node) {
+    if (!node || typeof node !== 'object') return;
+    if (visited.has(node)) return;
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      const normalized = node
+        .map((item) => normalizeGenericReviewItem(item, platform, storeId))
+        .filter(Boolean);
+
+      const unanswered = normalized.filter((item) => !item.has_reply);
+      const candidate = unanswered.length ? unanswered : normalized;
+      if (candidate.length > bestMatch.length) {
+        bestMatch = candidate;
+      }
+
+      for (const item of node) {
+        visit(item);
+      }
+      return;
+    }
+
+    for (const value of Object.values(node)) {
+      visit(value);
+    }
+  }
+
+  visit(payload);
+
+  const seen = new Set();
+  return bestMatch
+    .filter((review) => {
+      const key = `${review.platform_review_id}:${review.review_text}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(({ has_reply, ...review }) => review);
+}
+
+async function collectObservedReviewApi(page, platform, storeId, reviewUrl) {
+  const observedResponses = [];
+  const listener = (response) => {
+    const url = response.url().toLowerCase();
+    const contentType = response.headers()['content-type'] || '';
+    if (url.includes('review') && contentType.includes('application/json')) {
+      observedResponses.push(response);
+    }
+  };
+
+  page.on('response', listener);
+  try {
+    await page.goto(reviewUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      if (observedResponses.length > 0) {
+        break;
+      }
+      await page.waitForTimeout(250);
+    }
+  } finally {
+    page.off('response', listener);
+  }
+
+  const observedUrls = observedResponses.map((response) => response.url());
+
+  for (const response of observedResponses) {
+    const payload = await response.json().catch(() => null);
+    const reviews = extractGenericReviewsFromPayload(payload, platform, storeId);
+    if (reviews.length > 0) {
+      return {
+        reviews,
+        source: response.url(),
+        observedUrls
+      };
+    }
+  }
+
+  return {
+    reviews: [],
+    source: '',
+    observedUrls
+  };
+}
+
 async function collectYogiyoReviewsViaApi(page, storeId, reviewUrl) {
   const observedResponses = [];
   const listener = (response) => {
@@ -561,33 +986,60 @@ async function loginPlatform(platform, credentials) {
 
   try {
     console.log(`[${config.name}] 로그인 시도...`);
-    
-    await page.goto(config.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000);
-    
-    // 로그인 아이디 입력
-    const emailInput = await waitForVisibleSelector(page, config.selectors.loginEmail, 20000);
-    await emailInput.fill(credentials.email);
-    
-    // 비밀번호 입력
-    const passwordInput = await waitForVisibleSelector(page, config.selectors.loginPassword, 10000);
-    await passwordInput.fill(credentials.password);
-    
-    // 로그인 버튼 클릭
-    const loginButton = await waitForVisibleSelector(page, config.selectors.loginButton, 10000);
-    await loginButton.click();
-    
-    // 페이지 전환 대기
+
+    await openLoginSurface(platform, page, config);
+
+    const usernameField = await findLoginField(
+      page,
+      config.selectors.loginEmail,
+      [
+        'input:not([type="hidden"]):not([type="password"]):not([type="checkbox"]):not([type="radio"]):not([disabled])',
+        'textarea:not([disabled])'
+      ],
+      25000
+    );
+    await usernameField.locator.fill(credentials.email);
+
+    let passwordField = await probeVisibleSelectorInFrames(page, config.selectors.loginPassword, 3000);
+    if (!passwordField) {
+      const nextButton = await probeVisibleSelectorInFrames(page, config.selectors.loginButton, 3000);
+      if (nextButton) {
+        await nextButton.locator.click().catch(() => {});
+        await page.waitForTimeout(1500);
+      }
+
+      passwordField = await findLoginField(
+        page,
+        config.selectors.loginPassword,
+        ['input[type="password"]:not([disabled])'],
+        12000
+      );
+    }
+    await passwordField.locator.fill(credentials.password);
+
+    const loginButton = await findLoginField(
+      page,
+      config.selectors.loginButton,
+      ['button[type="submit"]', 'input[type="submit"]', 'button', '[role="button"]'],
+      10000
+    );
+    await loginButton.locator.click();
+
     await page.waitForNavigation({ timeout: 15000 }).catch(() => {});
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
     await page.waitForTimeout(3000);
-    
-    // 로그인 성공 확인 (URL이 login이 아닌지)
+
     const currentUrl = page.url();
-    session.loggedIn = !currentUrl.includes('login') && !currentUrl.includes('nid.naver.com/nidlogin');
+    session.loggedIn = isLoginSuccessUrl(platform, currentUrl);
     session.lastActivity = Date.now();
-    
+
     console.log(`[${config.name}] 로그인 ${session.loggedIn ? '성공' : '실패'}: ${currentUrl}`);
-    
+
+    if (!session.loggedIn) {
+      const diagnostics = await getPageDiagnostics(page);
+      console.warn(`[${config.name}] 로그인 실패 진단: ${formatPageDiagnostics(diagnostics)}`);
+    }
+
     return {
       success: session.loggedIn,
       platform,
@@ -595,7 +1047,13 @@ async function loginPlatform(platform, credentials) {
     };
   } catch (error) {
     const currentUrl = page.url();
-    console.error(`[${config.name}] 로그인 에러:`, error.message, currentUrl);
+    const diagnostics = await getPageDiagnostics(page);
+    console.error(
+      `[${config.name}] 로그인 에러:`,
+      error.message,
+      currentUrl,
+      formatPageDiagnostics(diagnostics)
+    );
     session.loggedIn = false;
     await closePlatformSession(platform);
     return {
@@ -665,6 +1123,27 @@ async function fetchReviews(platform, storeId, options = {}) {
         }
       );
     } else {
+      const apiResult = await collectObservedReviewApi(page, platform, storeId, config.reviewUrl);
+      if (apiResult.reviews.length > 0) {
+        session.lastActivity = Date.now();
+        console.log(
+          `[${config.name}] ${apiResult.reviews.length}건의 리뷰 수집 완료 (API: ${apiResult.source || 'unknown'})`
+        );
+        return {
+          success: true,
+          platform,
+          store_id: storeId,
+          reviews: apiResult.reviews,
+          fetched_at: new Date().toISOString(),
+          count: apiResult.reviews.length
+        };
+      }
+
+      console.warn(
+        `[${config.name}] API 리뷰 응답에서 데이터를 찾지 못했습니다. DOM fallback 시도`,
+        { observedUrls: apiResult.observedUrls }
+      );
+
       await page.goto(config.reviewUrl, { waitUntil: 'networkidle', timeout: 30000 });
     }
     
@@ -704,7 +1183,13 @@ async function fetchReviews(platform, storeId, options = {}) {
       count: reviews.length
     };
   } catch (error) {
-    console.error(`[${config.name}] 리뷰 수집 에러:`, error.message, page.url());
+    const diagnostics = await getPageDiagnostics(page);
+    console.error(
+      `[${config.name}] 리뷰 수집 에러:`,
+      error.message,
+      page.url(),
+      formatPageDiagnostics(diagnostics)
+    );
     await closePlatformSession(platform);
     return {
       success: false,
