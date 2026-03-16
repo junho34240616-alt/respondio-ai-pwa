@@ -354,6 +354,51 @@ function formatPageDiagnostics(diagnostics) {
   return parts.filter(Boolean).join(' | ');
 }
 
+function flattenDiagnosticsText(diagnostics) {
+  return [
+    diagnostics.currentUrl,
+    ...(diagnostics.frames || []).flatMap((frame) => [
+      frame.url,
+      frame.title,
+      frame.bodyText,
+      ...(frame.inputs || []).flatMap((input) => [
+        input.tag,
+        input.type,
+        input.name,
+        input.id,
+        input.placeholder,
+        input.ariaLabel
+      ]),
+      ...(frame.buttons || []).map((button) => button.text)
+    ])
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function deriveLoginFailureMessage(platform, currentUrl, diagnostics) {
+  const text = flattenDiagnosticsText(diagnostics);
+
+  if (platform === 'baemin') {
+    if (text.includes('captcha') || text.includes('자동입력 방지')) {
+      return `로그인 실패 - 네이버 추가 인증 또는 CAPTCHA가 표시되었습니다. 현재 서버 자동 로그인으로는 진행하기 어렵습니다. (${currentUrl})`;
+    }
+
+    if (text.includes('비밀번호를 확인') || text.includes('아이디 또는 전화번호') || text.includes('다시 확인해주세요')) {
+      return `로그인 실패 - 네이버 로그인 단계에서 크리덴셜 검증 또는 추가 인증이 필요합니다. (${currentUrl})`;
+    }
+  }
+
+  if (platform === 'coupang_eats') {
+    if (text.includes('access denied') || text.includes('errors.edgesuite.net')) {
+      return `로그인 실패 - 쿠팡이츠가 현재 서버 IP를 차단하고 있습니다. Render 서버 대신 로컬 또는 다른 IP 환경이 필요합니다. (${currentUrl})`;
+    }
+  }
+
+  return `로그인 실패 - 크리덴셜 또는 추가 인증 상태 확인 필요 (${currentUrl})`;
+}
+
 function isLoginSuccessUrl(platform, currentUrl) {
   if (!currentUrl) return false;
 
@@ -1037,17 +1082,26 @@ async function loginPlatform(platform, credentials) {
 
     if (!session.loggedIn) {
       const diagnostics = await getPageDiagnostics(page);
+      const failureMessage = deriveLoginFailureMessage(platform, currentUrl, diagnostics);
       console.warn(`[${config.name}] 로그인 실패 진단: ${formatPageDiagnostics(diagnostics)}`);
+      await closePlatformSession(platform);
+
+      return {
+        success: false,
+        platform,
+        message: failureMessage
+      };
     }
 
     return {
       success: session.loggedIn,
       platform,
-      message: session.loggedIn ? '로그인 성공' : `로그인 실패 - 크리덴셜 또는 추가 인증 상태 확인 필요 (${currentUrl})`
+      message: '로그인 성공'
     };
   } catch (error) {
     const currentUrl = page.url();
     const diagnostics = await getPageDiagnostics(page);
+    const failureMessage = deriveLoginFailureMessage(platform, currentUrl, diagnostics);
     console.error(
       `[${config.name}] 로그인 에러:`,
       error.message,
@@ -1059,7 +1113,7 @@ async function loginPlatform(platform, credentials) {
     return {
       success: false,
       platform,
-      message: `로그인 에러 (${currentUrl}): ${error.message}`
+      message: `${failureMessage}${failureMessage.includes(error.message) ? '' : ` / 원본: ${error.message}`}`
     };
   }
 }
