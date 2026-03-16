@@ -234,6 +234,27 @@ function baseHead(title: string, extraHead = '') {
       return response;
     }
 
+    async function readJsonResponse(response) {
+      const text = await response.text();
+      if (!text) {
+        return {
+          error: {
+            message: '서버가 빈 응답을 반환했습니다. CRAWLER_API_BASE 또는 터널 상태를 확인해주세요.'
+          }
+        };
+      }
+
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        return {
+          error: {
+            message: '서버 응답을 해석하지 못했습니다: ' + text.slice(0, 180)
+          }
+        };
+      }
+    }
+
     async function logout() {
       try {
         await fetch('/api/v1/auth/logout', { method: 'POST' });
@@ -1978,7 +1999,7 @@ function settingsPage(options: PageOptions) {
 
     async function loadStoreSettings() {
       const response = await apiFetch('/api/v1/store/settings');
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok || data.error) {
         throw new Error(data?.error?.message || '매장 설정을 불러오지 못했습니다.');
       }
@@ -2020,7 +2041,7 @@ function settingsPage(options: PageOptions) {
 
     async function loadConnections() {
       const response = await apiFetch('/api/v1/platform_connections');
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok || data.error) {
         throw new Error(data?.error?.message || '플랫폼 연결 상태를 불러오지 못했습니다.');
       }
@@ -2042,7 +2063,7 @@ function settingsPage(options: PageOptions) {
           method: 'PATCH',
           body: JSON.stringify(payload)
         });
-        const data = await response.json();
+        const data = await readJsonResponse(response);
         if (!response.ok || data.error) {
           showSettingsAlert(data?.error?.message || '설정 저장에 실패했습니다.', 'error');
           return;
@@ -2074,7 +2095,7 @@ function settingsPage(options: PageOptions) {
             platform_store_id: platformStoreId || null
           })
         });
-        const data = await response.json();
+        const data = await readJsonResponse(response);
         if (!response.ok || data.error || !data.success) {
           showSettingsAlert(data?.message || data?.error?.message || '플랫폼 연결에 실패했습니다.', 'error');
           await loadConnections();
@@ -2096,7 +2117,7 @@ function settingsPage(options: PageOptions) {
         const response = await apiFetch('/api/v1/platform_connections/' + platform + '/disconnect', {
           method: 'POST'
         });
-        const data = await response.json();
+        const data = await readJsonResponse(response);
         if (!response.ok || data.error) {
           showSettingsAlert(data?.error?.message || '플랫폼 연결 해제에 실패했습니다.', 'error');
           return;
