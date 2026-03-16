@@ -1951,6 +1951,24 @@ function settingsPage(options: PageOptions) {
       el.className = 'max-w-4xl mb-6 rounded-2xl border px-5 py-4 text-sm ' + styles;
       el.textContent = message;
       el.classList.remove('hidden');
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function setPlatformActionLoading(platform, action, isLoading) {
+      const button = document.getElementById(platform + '-' + action + '-btn');
+      if (!button) return;
+
+      if (isLoading) {
+        button.disabled = true;
+        button.dataset.originalText = button.textContent || '';
+        button.classList.add('opacity-70', 'cursor-not-allowed');
+        button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>' + (action === 'connect' ? '연결 중...' : '해제 중...');
+        return;
+      }
+
+      button.disabled = false;
+      button.classList.remove('opacity-70', 'cursor-not-allowed');
+      button.textContent = button.dataset.originalText || (action === 'connect' ? '계정 연결' : '연결 해제');
     }
 
     function setReplyStyle(style) {
@@ -1989,12 +2007,12 @@ function settingsPage(options: PageOptions) {
           + statusBadge + '</div>'
           + '<div class="grid md:grid-cols-3 gap-3 mb-4">'
           + '<input id="' + platform + '-email" type="email" value="' + (connection.login_email || '') + '" placeholder="로그인 이메일" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
-          + '<input id="' + platform + '-password" type="password" placeholder="' + (connection.has_credentials ? '기존 비밀번호 저장됨' : '로그인 비밀번호') + '" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
+          + '<input id="' + platform + '-password" type="password" placeholder="' + (connection.has_credentials ? '비밀번호 재입력 필요' : '로그인 비밀번호') + '" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
           + '<input id="' + platform + '-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
           + '</div>'
           + '<div class="flex flex-wrap items-center gap-3">'
-          + '<button onclick="connectPlatform(\\'' + platform + '\\')" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">계정 연결</button>'
-          + '<button onclick="disconnectPlatform(\\'' + platform + '\\')" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">연결 해제</button>'
+          + '<button id="' + platform + '-connect-btn" onclick="connectPlatform(\\'' + platform + '\\')" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">계정 연결</button>'
+          + '<button id="' + platform + '-disconnect-btn" onclick="disconnectPlatform(\\'' + platform + '\\')" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">연결 해제</button>'
           + '<span class="text-xs text-gray-400">마지막 동기화: ' + (connection.last_sync_at ? new Date(connection.last_sync_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div></div>';
       }).join('');
@@ -2042,10 +2060,11 @@ function settingsPage(options: PageOptions) {
       const platformStoreId = document.getElementById(platform + '-store-id').value.trim();
 
       if (!loginEmail || !loginPassword) {
-        showSettingsAlert('플랫폼 이메일과 비밀번호를 입력해주세요.', 'error');
+        showSettingsAlert('플랫폼 이메일과 비밀번호를 모두 입력해주세요. 저장된 비밀번호가 있어도 보안상 다시 입력해야 합니다.', 'error');
         return;
       }
 
+      setPlatformActionLoading(platform, 'connect', true);
       try {
         const response = await apiFetch('/api/v1/platform_connections/' + platform + '/connect', {
           method: 'POST',
@@ -2066,10 +2085,13 @@ function settingsPage(options: PageOptions) {
         await loadConnections();
       } catch (error) {
         showSettingsAlert('플랫폼 연결 실패: ' + error.message, 'error');
+      } finally {
+        setPlatformActionLoading(platform, 'connect', false);
       }
     }
 
     async function disconnectPlatform(platform) {
+      setPlatformActionLoading(platform, 'disconnect', true);
       try {
         const response = await apiFetch('/api/v1/platform_connections/' + platform + '/disconnect', {
           method: 'POST'
@@ -2084,6 +2106,8 @@ function settingsPage(options: PageOptions) {
         await loadConnections();
       } catch (error) {
         showSettingsAlert('플랫폼 연결 해제 실패: ' + error.message, 'error');
+      } finally {
+        setPlatformActionLoading(platform, 'disconnect', false);
       }
     }
 
