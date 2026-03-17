@@ -1,9 +1,0 @@
-{
-  "name": "respondio-mobile-app-shell",
-  "private": true,
-  "type": "module",
-  "description": "Framework-agnostic scaffold for the Respondio direct-login mobile shell",
-  "scripts": {
-    "describe": "node ./src/example/print-contract.js"
-  }
-}
