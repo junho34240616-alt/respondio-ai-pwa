@@ -1,7 +1,7 @@
 export const PLATFORM_SESSION_CONFIGS = {
   baemin: {
     label: '배달의민족',
-    loginUrl: 'https://self.baemin.com/login',
+    loginUrl: 'https://self.baemin.com/bridge',
     reviewUrl: 'https://self.baemin.com/reviews'
   },
   coupang_eats: {
