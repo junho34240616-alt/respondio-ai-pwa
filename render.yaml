@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: respondio-crawler
+    runtime: docker
+    plan: free
+    dockerfilePath: ./crawler/Dockerfile
+    dockerContext: ./crawler
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: WEBAPP_API
+        sync: false
+      - key: CRAWLER_SHARED_SECRET
+        sync: false
