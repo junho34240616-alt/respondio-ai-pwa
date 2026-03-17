@@ -2356,7 +2356,7 @@ function mobileSessionCenterPage(isAppShell = false) {
       const container = document.getElementById('mobile-session-list');
       container.innerHTML = Object.entries(mobilePlatformMeta).map(([platform, meta]) => {
         const connection = (connections || []).find(item => item.platform === platform) || {};
-        const statusText = connection.last_error || '직접 로그인 세션을 준비하고 모바일 앱에서 로그인하세요.';
+        const statusText = connection.last_error || '앱에서 바로 로그인하면 세션 준비와 로그인 창 열기가 함께 진행됩니다.';
         return '<div class="bg-white border border-gray-100 rounded-3xl ${cardPaddingClass} shadow-sm">'
           + '<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">'
           + '<div class="flex items-center gap-3">'
@@ -2368,8 +2368,7 @@ function mobileSessionCenterPage(isAppShell = false) {
           + '<div class="text-sm text-gray-500 border border-dashed border-gray-200 rounded-xl px-4 py-3">로그인 URL: ' + meta.loginUrl + '</div>'
           + '</div>'
           + '<div class="${actionRowClass}">'
-          + '<button onclick="prepareDirectSession(\\'' + platform + '\\')" class="${actionButtonWidthClass} bg-brand-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">직접 로그인 준비</button>'
-          + '<button onclick="openNativeLogin(\\'' + platform + '\\')" class="${actionButtonWidthClass} border border-brand-200 text-brand-600 px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-50 transition">앱에서 로그인 열기</button>'
+          + '<button onclick="openNativeLogin(\\'' + platform + '\\')" class="${actionButtonWidthClass} bg-brand-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">앱에서 바로 로그인</button>'
           + '<button onclick="loadConnections()" class="${actionButtonWidthClass} border border-gray-200 text-gray-600 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">상태 확인</button>'
           + '<span class="text-xs text-gray-400 leading-5">세션 연결 시각: ' + (connection.session_connected_at ? new Date(connection.session_connected_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div></div>';
@@ -2409,22 +2408,48 @@ function mobileSessionCenterPage(isAppShell = false) {
       }
     }
 
-    function openNativeLogin(platform) {
+    async function openNativeLogin(platform) {
       const meta = mobilePlatformMeta[platform];
       const storeId = document.getElementById(platform + '-mobile-store-id').value.trim();
-      const delivered = sendNativeBridgeMessage({
-        type: 'open_platform_login',
-        platform,
-        platformStoreId: storeId || null,
-        loginUrl: meta.loginUrl,
-        reviewUrl: meta.reviewUrl,
-        callbackPath: '/api/v1/platform_connections/' + platform + '/session-state'
-      });
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/connect', {
+          method: 'POST',
+          body: JSON.stringify({
+            auth_mode: 'direct_session',
+            platform_store_id: storeId || null
+          })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showMobileSessionAlert(data?.error?.message || '직접 로그인 세션 준비에 실패했습니다.', 'error');
+          return;
+        }
+
+        await loadConnections();
+      } catch (error) {
+        showMobileSessionAlert('직접 로그인 세션 준비 실패: ' + error.message, 'error');
+        return;
+      }
+
+      let delivered = false;
+      try {
+        delivered = sendNativeBridgeMessage({
+          type: 'open_platform_login',
+          platform,
+          platformStoreId: storeId || null,
+          loginUrl: meta.loginUrl,
+          reviewUrl: meta.reviewUrl,
+          callbackPath: '/api/v1/platform_connections/' + platform + '/session-state'
+        });
+      } catch (error) {
+        showMobileSessionAlert('앱 브리지 호출 실패: ' + (error?.message || 'unknown error'), 'error');
+        return;
+      }
 
       if (!delivered) {
         showMobileSessionAlert('현재 브라우저에는 앱 브리지가 연결되어 있지 않습니다. 이 화면은 향후 모바일 앱/WebView에서 사용됩니다.', 'info');
       } else {
-        showMobileSessionAlert(meta.label + ' 로그인 창을 모바일 앱 브리지에 요청했습니다.', 'success');
+        showMobileSessionAlert(meta.label + ' 로그인 창을 여는 중입니다. 앱 로그인 화면에서 직접 인증을 완료해 주세요.', 'success');
       }
     }
 
@@ -2494,7 +2519,7 @@ function mobileAppShellPage() {
         <div class="mb-6">
           <div class="text-xs uppercase tracking-[0.24em] text-brand-300 mb-2">Bridge Debug</div>
           <h2 class="text-2xl font-bold mb-2">직접 로그인 세션 시뮬레이터</h2>
-          <p class="text-sm text-gray-400 leading-relaxed">왼쪽 세션 센터에서 "앱에서 로그인 열기"를 누르면, 이 셸이 네이티브 앱 브리지처럼 메시지를 받습니다. 지금은 실제 WebView 대신 세션 상태 보고를 시뮬레이션합니다.</p>
+          <p class="text-sm text-gray-400 leading-relaxed">왼쪽 세션 센터에서 "앱에서 바로 로그인"을 누르면, 이 셸이 네이티브 앱 브리지처럼 메시지를 받습니다. 지금은 실제 WebView 대신 세션 상태 보고를 시뮬레이션합니다.</p>
         </div>
 
         <div id="mobile-shell-alert" class="hidden rounded-2xl border px-5 py-4 text-sm mb-5"></div>
@@ -2520,8 +2545,8 @@ function mobileAppShellPage() {
         <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
           <div class="text-xs text-gray-400 mb-3">사용 흐름</div>
           <ol class="space-y-3 text-sm text-gray-200">
-            <li>1. 왼쪽 세션 센터에서 플랫폼별 직접 로그인 준비</li>
-            <li>2. "앱에서 로그인 열기"를 누르면 이 셸이 브리지 요청을 받음</li>
+            <li>1. 왼쪽 세션 센터에서 "앱에서 바로 로그인"을 누름</li>
+            <li>2. 세션 준비와 브리지 요청이 함께 처리됨</li>
             <li>3. 실제 모바일 앱에서는 여기서 플랫폼 로그인 WebView를 연 뒤 사용자가 직접 로그인</li>
             <li>4. 로그인 성공 시 /api/v1/platform_connections/:platform/session-state 로 세션 활성 보고</li>
           </ol>
