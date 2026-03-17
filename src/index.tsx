@@ -152,9 +152,35 @@ function baseHead(title: string, extraHead = '') {
       return user && (user.role === 'admin' || user.role === 'super_admin');
     }
 
+    function resolveSafeNextPath(candidate) {
+      if (!candidate || typeof candidate !== 'string') {
+        return null;
+      }
+
+      if (!candidate.startsWith('/')) {
+        return null;
+      }
+
+      if (candidate.startsWith('//')) {
+        return null;
+      }
+
+      return candidate;
+    }
+
+    function buildLoginRedirectUrl(nextPath) {
+      const loginUrl = new URL('/login', window.location.origin);
+      const safeNext = resolveSafeNextPath(nextPath);
+      if (safeNext) {
+        loginUrl.searchParams.set('next', safeNext);
+      }
+      return loginUrl.toString();
+    }
+
     function ensureAuthenticated(requiredRole) {
       const session = getAuthSession();
       if (!session?.access_token || !session?.user) {
+        const currentPath = window.location.pathname + window.location.search + window.location.hash;
         refreshAuthSession().then(function(restored) {
           if (restored) {
             window.location.reload();
@@ -162,7 +188,7 @@ function baseHead(title: string, extraHead = '') {
           }
 
           if (window.location.pathname !== '/login') {
-            window.location.href = '/login';
+            window.location.href = buildLoginRedirectUrl(currentPath);
           }
         });
         return false;
@@ -229,7 +255,8 @@ function baseHead(title: string, extraHead = '') {
       if (response.status === 401) {
         clearAuthSession();
         if (window.location.pathname !== '/login') {
-          window.location.href = '/login';
+          const currentPath = window.location.pathname + window.location.search + window.location.hash;
+          window.location.href = buildLoginRedirectUrl(currentPath);
         }
       }
 
@@ -644,15 +671,17 @@ function loginPage(initialTab: 'login' | 'signup' = 'login') {
     </div>
   </div>
   <script>
+    const redirectTarget = resolveSafeNextPath(new URL(window.location.href).searchParams.get('next')) || null;
+
     const existingSession = getAuthSession();
     if (existingSession?.access_token && existingSession?.user) {
-      window.location.href = isAdminUser(existingSession.user) ? '/admin' : '/dashboard';
+      window.location.href = redirectTarget || (isAdminUser(existingSession.user) ? '/admin' : '/dashboard');
     } else {
       refreshAuthSession().then(function(restored) {
         if (!restored) return;
         const restoredSession = getAuthSession();
         if (!restoredSession?.user) return;
-        window.location.href = isAdminUser(restoredSession.user) ? '/admin' : '/dashboard';
+        window.location.href = redirectTarget || (isAdminUser(restoredSession.user) ? '/admin' : '/dashboard');
       });
     }
 
@@ -698,7 +727,7 @@ function loginPage(initialTab: 'login' | 'signup' = 'login') {
         }
 
         saveAuthSession(data);
-        window.location.href = isAdminUser(data.user) ? '/admin' : '/dashboard';
+        window.location.href = redirectTarget || (isAdminUser(data.user) ? '/admin' : '/dashboard');
       } catch (error) {
         alert('로그인에 실패했습니다: ' + error.message);
       }
@@ -729,7 +758,7 @@ function loginPage(initialTab: 'login' | 'signup' = 'login') {
         }
 
         saveAuthSession(data);
-        window.location.href = '/dashboard';
+        window.location.href = redirectTarget || '/dashboard';
       } catch (error) {
         alert('회원가입에 실패했습니다: ' + error.message);
       }
