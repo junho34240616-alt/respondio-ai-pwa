@@ -1,5 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Modal, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Modal, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { buildReactNativeInjectedBridgeScript } from '../../src/adapters/injectedBridgeScript.js';
 import { buildReactNativePlatformPageSignalScript } from '../../src/adapters/platformPageSignalScript.js';
@@ -76,11 +76,14 @@ export function RespondioSessionShell(props) {
     appBaseUrl = 'https://respondio-ai-pwa.pages.dev'
   } = props || {};
 
+  const { width } = useWindowDimensions();
+  const isCompact = width < 768;
   const webViewRef = useRef(null);
   const loginWebViewRef = useRef(null);
   const autoSubmittedRef = useRef('');
   const [activeRequest, setActiveRequest] = useState(null);
   const [eventLog, setEventLog] = useState([]);
+  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
   const [isLoginViewOpen, setIsLoginViewOpen] = useState(false);
   const [loginOutcome, setLoginOutcome] = useState(null);
   const [sessionCenterNavState, setSessionCenterNavState] = useState({
@@ -97,7 +100,7 @@ export function RespondioSessionShell(props) {
   });
 
   const sessionCenterUrl = useMemo(() => {
-    return String(appBaseUrl || '').replace(/\/$/, '') + '/mobile/session-center';
+    return String(appBaseUrl || '').replace(/\/$/, '') + '/mobile/session-center?app_shell=1';
   }, [appBaseUrl]);
 
   const injectedJavaScriptBeforeContentLoaded = useMemo(() => {
@@ -135,6 +138,7 @@ export function RespondioSessionShell(props) {
         canGoForward: false,
         loading: true
       });
+      setIsInspectorOpen(true);
       setIsLoginViewOpen(true);
       appendLog(payload.platform + ' 직접 로그인 요청 수신');
     } catch (error) {
@@ -257,6 +261,77 @@ export function RespondioSessionShell(props) {
   }
 
   const loginStatusTone = getOutcomeTone(loginOutcome);
+  const controlsContent = React.createElement(
+    ScrollView,
+    { style: styles.sidebar, contentContainerStyle: styles.sidebarContent },
+    React.createElement(
+      View,
+      { style: styles.card },
+      React.createElement(Text, { style: styles.cardEyebrow }, 'Environment'),
+      React.createElement(Text, { style: styles.cardTitle }, '세션 센터 연결'),
+      React.createElement(Text, { style: styles.cardText }, '앱 기본 URL: ' + appBaseUrl),
+      React.createElement(Text, { style: styles.cardText }, '현재 주소: ' + (sessionCenterNavState.url || sessionCenterUrl)),
+      React.createElement(
+        View,
+        { style: styles.inlineButtonRow },
+        React.createElement(
+          TouchableOpacity,
+          { style: styles.ghostButton, onPress: reloadSessionCenter },
+          React.createElement(Text, { style: styles.ghostButtonText }, sessionCenterNavState.loading ? '불러오는 중...' : '세션 센터 새로고침')
+        ),
+        React.createElement(
+          TouchableOpacity,
+          { style: styles.ghostButton, onPress: clearEventLog },
+          React.createElement(Text, { style: styles.ghostButtonText }, '로그 지우기')
+        )
+      )
+    ),
+    React.createElement(
+      View,
+      { style: styles.card },
+      React.createElement(Text, { style: styles.cardEyebrow }, 'Active Request'),
+      React.createElement(Text, { style: styles.cardTitle }, activeRequest ? activeRequest.platform : '요청 없음'),
+      React.createElement(Text, { style: styles.cardText }, activeRequest ? activeRequest.loginUrl : '세션 센터에서 플랫폼 직접 로그인 요청을 기다리는 중입니다.'),
+      React.createElement(
+        View,
+        { style: styles.buttonGroup },
+        React.createElement(
+          TouchableOpacity,
+          { style: [styles.actionButton, styles.successButton], onPress: () => sendSessionResult('connected') },
+          React.createElement(Text, { style: styles.actionButtonText }, '성공 처리')
+        ),
+        React.createElement(
+          TouchableOpacity,
+          { style: [styles.actionButton, styles.errorButton], onPress: () => sendSessionResult('error') },
+          React.createElement(Text, { style: styles.actionButtonText }, '실패 처리')
+        ),
+        React.createElement(
+          TouchableOpacity,
+          { style: [styles.actionButton, styles.warningButton], onPress: () => sendSessionResult('expired') },
+          React.createElement(Text, { style: styles.actionButtonText }, '만료 처리')
+        )
+      )
+    ),
+    React.createElement(
+      View,
+      { style: styles.card },
+      React.createElement(Text, { style: styles.cardEyebrow }, 'Login Guide'),
+      React.createElement(Text, { style: styles.cardTitle }, activeRequest ? '직접 로그인 안내' : '대기 중'),
+      ...(platformInstructions.length
+        ? platformInstructions.map((entry, index) =>
+            React.createElement(Text, { key: entry + index, style: styles.logText }, '• ' + entry)
+          )
+        : [React.createElement(Text, { key: 'guide-empty', style: styles.cardText }, '플랫폼 요청이 오면 안내가 표시됩니다.')])
+    ),
+    React.createElement(
+      View,
+      { style: styles.card },
+      React.createElement(Text, { style: styles.cardEyebrow }, 'Event Log'),
+      ...(eventLog.length
+        ? eventLog.map((entry) => React.createElement(Text, { key: entry, style: styles.logText }, entry))
+        : [React.createElement(Text, { key: 'empty', style: styles.cardText }, '아직 브리지 로그가 없습니다.')])
+    )
+  );
 
   return React.createElement(
     SafeAreaView,
@@ -266,10 +341,10 @@ export function RespondioSessionShell(props) {
       { style: styles.layout },
       React.createElement(
         View,
-        { style: styles.viewerPane },
+        { style: [styles.viewerPane, isCompact ? styles.viewerPaneCompact : null] },
         React.createElement(
           View,
-          { style: styles.header },
+          { style: [styles.header, isCompact ? styles.headerCompact : null] },
           React.createElement(Text, { style: styles.title }, 'Respondio Session Shell'),
           React.createElement(Text, { style: styles.subtitle }, '원격 세션 센터를 WebView로 열고 직접 로그인 세션을 중계합니다.'),
           React.createElement(
@@ -296,76 +371,50 @@ export function RespondioSessionShell(props) {
           style: styles.webView
         })
       ),
+      isCompact
+        ? React.createElement(
+            View,
+            { style: styles.compactToolbar },
+            React.createElement(
+              TouchableOpacity,
+              { style: styles.compactToolbarButton, onPress: () => setIsInspectorOpen(true) },
+              React.createElement(Text, { style: styles.compactToolbarButtonText }, activeRequest ? '로그인 도구 열기' : '세션 도구 열기')
+            ),
+            React.createElement(
+              TouchableOpacity,
+              { style: styles.compactToolbarGhostButton, onPress: reloadSessionCenter },
+              React.createElement(Text, { style: styles.compactToolbarGhostText }, '새로고침')
+            )
+          )
+        : controlsContent
+    ),
+    React.createElement(
+      Modal,
+      {
+        visible: isCompact && isInspectorOpen,
+        animationType: 'slide',
+        presentationStyle: 'pageSheet',
+        onRequestClose: () => setIsInspectorOpen(false)
+      },
       React.createElement(
-        ScrollView,
-        { style: styles.sidebar, contentContainerStyle: styles.sidebarContent },
+        SafeAreaView,
+        { style: styles.inspectorSafeArea },
         React.createElement(
           View,
-          { style: styles.card },
-          React.createElement(Text, { style: styles.cardEyebrow }, 'Environment'),
-          React.createElement(Text, { style: styles.cardTitle }, '세션 센터 연결'),
-          React.createElement(Text, { style: styles.cardText }, '앱 기본 URL: ' + appBaseUrl),
-          React.createElement(Text, { style: styles.cardText }, '현재 주소: ' + (sessionCenterNavState.url || sessionCenterUrl)),
+          { style: styles.inspectorHeader },
           React.createElement(
             View,
-            { style: styles.inlineButtonRow },
-            React.createElement(
-              TouchableOpacity,
-              { style: styles.ghostButton, onPress: reloadSessionCenter },
-              React.createElement(Text, { style: styles.ghostButtonText }, sessionCenterNavState.loading ? '불러오는 중...' : '세션 센터 새로고침')
-            ),
-            React.createElement(
-              TouchableOpacity,
-              { style: styles.ghostButton, onPress: clearEventLog },
-              React.createElement(Text, { style: styles.ghostButtonText }, '로그 지우기')
-            )
-          )
-        ),
-        React.createElement(
-          View,
-          { style: styles.card },
-          React.createElement(Text, { style: styles.cardEyebrow }, 'Active Request'),
-          React.createElement(Text, { style: styles.cardTitle }, activeRequest ? activeRequest.platform : '요청 없음'),
-          React.createElement(Text, { style: styles.cardText }, activeRequest ? activeRequest.loginUrl : '세션 센터에서 플랫폼 직접 로그인 요청을 기다리는 중입니다.'),
+            null,
+            React.createElement(Text, { style: styles.modalTitle }, '세션 도구'),
+            React.createElement(Text, { style: styles.modalSubtitle }, activeRequest ? activeRequest.platform + ' 로그인 상태를 여기서 확인하세요.' : '필요할 때만 열어 쓰는 보조 패널입니다.')
+          ),
           React.createElement(
-            View,
-            { style: styles.buttonGroup },
-            React.createElement(
-              TouchableOpacity,
-              { style: [styles.actionButton, styles.successButton], onPress: () => sendSessionResult('connected') },
-              React.createElement(Text, { style: styles.actionButtonText }, '성공 처리')
-            ),
-            React.createElement(
-              TouchableOpacity,
-              { style: [styles.actionButton, styles.errorButton], onPress: () => sendSessionResult('error') },
-              React.createElement(Text, { style: styles.actionButtonText }, '실패 처리')
-            ),
-            React.createElement(
-              TouchableOpacity,
-              { style: [styles.actionButton, styles.warningButton], onPress: () => sendSessionResult('expired') },
-              React.createElement(Text, { style: styles.actionButtonText }, '만료 처리')
-            )
+            TouchableOpacity,
+            { style: styles.modalCloseButton, onPress: () => setIsInspectorOpen(false) },
+            React.createElement(Text, { style: styles.modalCloseButtonText }, '닫기')
           )
         ),
-        React.createElement(
-          View,
-          { style: styles.card },
-          React.createElement(Text, { style: styles.cardEyebrow }, 'Login Guide'),
-          React.createElement(Text, { style: styles.cardTitle }, activeRequest ? '직접 로그인 안내' : '대기 중'),
-          ...(platformInstructions.length
-            ? platformInstructions.map((entry, index) =>
-                React.createElement(Text, { key: entry + index, style: styles.logText }, '• ' + entry)
-              )
-            : [React.createElement(Text, { key: 'guide-empty', style: styles.cardText }, '플랫폼 요청이 오면 안내가 표시됩니다.')])
-        ),
-        React.createElement(
-          View,
-          { style: styles.card },
-          React.createElement(Text, { style: styles.cardEyebrow }, 'Event Log'),
-          ...(eventLog.length
-            ? eventLog.map((entry) => React.createElement(Text, { key: entry, style: styles.logText }, entry))
-            : [React.createElement(Text, { key: 'empty', style: styles.cardText }, '아직 브리지 로그가 없습니다.')])
-        )
+        controlsContent
       )
     ),
     React.createElement(
@@ -495,9 +544,16 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(255,255,255,0.08)'
   },
+  viewerPaneCompact: {
+    borderBottomWidth: 0
+  },
   header: {
     paddingHorizontal: 20,
     paddingVertical: 16
+  },
+  headerCompact: {
+    paddingHorizontal: 16,
+    paddingVertical: 12
   },
   title: {
     color: '#F8FAFC',
@@ -531,6 +587,41 @@ const styles = StyleSheet.create({
   webView: {
     flex: 1,
     backgroundColor: '#FFFFFF'
+  },
+  compactToolbar: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 16,
+    flexDirection: 'row',
+    gap: 10
+  },
+  compactToolbarButton: {
+    flex: 1,
+    borderRadius: 16,
+    backgroundColor: '#F97316',
+    paddingVertical: 14,
+    paddingHorizontal: 16
+  },
+  compactToolbarButtonText: {
+    color: '#FFFFFF',
+    textAlign: 'center',
+    fontWeight: '700',
+    fontSize: 14
+  },
+  compactToolbarGhostButton: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: 'rgba(15,23,42,0.92)',
+    paddingVertical: 14,
+    paddingHorizontal: 18
+  },
+  compactToolbarGhostText: {
+    color: '#E2E8F0',
+    textAlign: 'center',
+    fontWeight: '700',
+    fontSize: 14
   },
   sidebar: {
     flex: 1,
@@ -606,6 +697,20 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     fontWeight: '600',
     fontSize: 13
+  },
+  inspectorSafeArea: {
+    flex: 1,
+    backgroundColor: '#0F172A'
+  },
+  inspectorHeader: {
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.08)',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12
   },
   modalSafeArea: {
     flex: 1,
