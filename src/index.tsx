@@ -51,7 +51,7 @@ app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env))))
 app.get('/billing', (c) => c.html(billingPage(getPageOptions(c.env))))
 app.get('/settings', (c) => c.html(settingsPage(getPageOptions(c.env))))
 app.get('/customers', (c) => c.html(customersPage(getPageOptions(c.env))))
-app.get('/mobile/session-center', (c) => c.html(mobileSessionCenterPage()))
+app.get('/mobile/session-center', (c) => c.html(mobileSessionCenterPage(c.req.query('app_shell') === '1')))
 app.get('/mobile/app-shell', (c) => c.html(mobileAppShellPage()))
 
 // ============ ADMIN PAGES ============
@@ -2253,18 +2253,26 @@ function settingsPage(options: PageOptions) {
 </html>`
 }
 
-function mobileSessionCenterPage() {
+function mobileSessionCenterPage(isAppShell = false) {
+  const cardPaddingClass = isAppShell ? 'p-5' : 'p-6'
+  const gridColsClass = isAppShell ? 'grid-cols-1' : 'md:grid-cols-2'
+  const actionRowClass = isAppShell ? 'flex flex-col gap-3' : 'flex flex-wrap items-center gap-3'
+  const actionButtonWidthClass = isAppShell ? 'w-full' : ''
+
   return `${baseHead('모바일 세션 센터')}
 <body class="bg-gray-50 min-h-screen">
-  <main class="max-w-5xl mx-auto px-4 py-8">
+  <main class="${isAppShell ? 'max-w-none mx-auto px-4 py-4' : 'max-w-5xl mx-auto px-4 py-8'}">
+    ${isAppShell ? '' : `
     <div class="mb-6">
       <a href="/settings" class="text-sm text-brand-600 hover:text-brand-700"><i class="fas fa-arrow-left mr-2"></i>설정으로 돌아가기</a>
-    </div>
+    </div>`}
     <div class="bg-white border border-gray-100 rounded-3xl p-6 mb-6">
       <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h1 class="text-2xl font-bold text-gray-900">모바일 직접 로그인 세션 센터</h1>
-          <p class="text-sm text-gray-500 mt-2">이 화면은 향후 모바일 앱/WebView 안에서 플랫폼 직접 로그인을 시작하는 허브입니다. 현재 웹 브라우저에서는 브리지 호출만 준비되고, 실제 세션 생성은 모바일 앱 구현이 필요합니다.</p>
+          <p class="text-sm text-gray-500 mt-2">${isAppShell
+            ? '앱 전용 직접 로그인 허브입니다. 아래에서 플랫폼을 선택하면 앱이 로그인 WebView를 열고, 로그인 성공 후 세션 상태를 이 화면으로 다시 전달합니다.'
+            : '이 화면은 향후 모바일 앱/WebView 안에서 플랫폼 직접 로그인을 시작하는 허브입니다. 현재 웹 브라우저에서는 브리지 호출만 준비되고, 실제 세션 생성은 모바일 앱 구현이 필요합니다.'}</p>
         </div>
         <button onclick="loadConnections()" class="border border-gray-200 text-gray-600 px-4 py-2 rounded-xl text-sm hover:bg-gray-50 transition">상태 새로고침</button>
       </div>
@@ -2349,21 +2357,21 @@ function mobileSessionCenterPage() {
       container.innerHTML = Object.entries(mobilePlatformMeta).map(([platform, meta]) => {
         const connection = (connections || []).find(item => item.platform === platform) || {};
         const statusText = connection.last_error || '직접 로그인 세션을 준비하고 모바일 앱에서 로그인하세요.';
-        return '<div class="bg-white border border-gray-100 rounded-3xl p-6">'
+        return '<div class="bg-white border border-gray-100 rounded-3xl ${cardPaddingClass} shadow-sm">'
           + '<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">'
           + '<div class="flex items-center gap-3">'
           + '<div class="w-11 h-11 rounded-full text-white text-xs font-bold flex items-center justify-center" style="background:' + meta.color + '">' + meta.label.slice(0, 2) + '</div>'
-          + '<div><div class="font-semibold text-gray-900">' + meta.label + '</div><div class="text-xs text-gray-400">' + statusText + '</div></div></div>'
-          + '<div class="flex items-center gap-2"><span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">방식: ' + (connection.auth_mode || 'direct_session') + '</span>' + getSessionBadge(connection) + '</div></div>'
-          + '<div class="grid md:grid-cols-2 gap-3 mb-4">'
+          + '<div><div class="font-semibold text-gray-900 text-base">' + meta.label + '</div><div class="text-xs text-gray-400 leading-5 mt-1">' + statusText + '</div></div></div>'
+          + '<div class="flex flex-wrap items-center gap-2"><span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">방식: ' + (connection.auth_mode || 'direct_session') + '</span>' + getSessionBadge(connection) + '</div></div>'
+          + '<div class="grid ${gridColsClass} gap-3 mb-4">'
           + '<input id="' + platform + '-mobile-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
           + '<div class="text-sm text-gray-500 border border-dashed border-gray-200 rounded-xl px-4 py-3">로그인 URL: ' + meta.loginUrl + '</div>'
           + '</div>'
-          + '<div class="flex flex-wrap items-center gap-3">'
-          + '<button onclick="prepareDirectSession(\\'' + platform + '\\')" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">직접 로그인 준비</button>'
-          + '<button onclick="openNativeLogin(\\'' + platform + '\\')" class="border border-brand-200 text-brand-600 px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-50 transition">앱에서 로그인 열기</button>'
-          + '<button onclick="loadConnections()" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">상태 확인</button>'
-          + '<span class="text-xs text-gray-400">세션 연결 시각: ' + (connection.session_connected_at ? new Date(connection.session_connected_at).toLocaleString('ko-KR') : '-') + '</span>'
+          + '<div class="${actionRowClass}">'
+          + '<button onclick="prepareDirectSession(\\'' + platform + '\\')" class="${actionButtonWidthClass} bg-brand-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">직접 로그인 준비</button>'
+          + '<button onclick="openNativeLogin(\\'' + platform + '\\')" class="${actionButtonWidthClass} border border-brand-200 text-brand-600 px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-50 transition">앱에서 로그인 열기</button>'
+          + '<button onclick="loadConnections()" class="${actionButtonWidthClass} border border-gray-200 text-gray-600 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">상태 확인</button>'
+          + '<span class="text-xs text-gray-400 leading-5">세션 연결 시각: ' + (connection.session_connected_at ? new Date(connection.session_connected_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div></div>';
       }).join('');
     }
@@ -2479,7 +2487,7 @@ function mobileAppShellPage() {
         </div>
         <a href="/settings" class="text-xs border border-white/10 text-gray-300 px-3 py-2 rounded-lg hover:bg-white/5 transition">설정으로 돌아가기</a>
       </div>
-      <iframe id="session-center-frame" src="/mobile/session-center" class="w-full h-[calc(100vh-81px)] bg-white"></iframe>
+      <iframe id="session-center-frame" src="/mobile/session-center?app_shell=1" class="w-full h-[calc(100vh-81px)] bg-white"></iframe>
     </section>
     <section class="p-6 bg-dark-950">
       <div class="max-w-xl">
