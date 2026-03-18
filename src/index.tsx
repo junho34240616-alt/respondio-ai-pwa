@@ -2008,13 +2008,23 @@ function settingsPage(options: PageOptions) {
         button.disabled = true;
         button.dataset.originalText = button.textContent || '';
         button.classList.add('opacity-70', 'cursor-not-allowed');
-        button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>' + (action === 'connect' ? '연결 중...' : '해제 중...');
+        const labels = {
+          connect: '연결 중...',
+          disconnect: '해제 중...',
+          refresh: '갱신 중...'
+        };
+        button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>' + (labels[action] || '처리 중...');
         return;
       }
 
       button.disabled = false;
       button.classList.remove('opacity-70', 'cursor-not-allowed');
-      button.textContent = button.dataset.originalText || (action === 'connect' ? '계정 연결' : '연결 해제');
+      const defaultLabels = {
+        connect: '계정 연결',
+        disconnect: '연결 해제',
+        refresh: '세션 갱신'
+      };
+      button.textContent = button.dataset.originalText || defaultLabels[action] || '확인';
     }
 
     function setReplyStyle(style) {
@@ -2029,6 +2039,10 @@ function settingsPage(options: PageOptions) {
       if (status === 'error') return '<span class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">세션 오류</span>';
       if (status === 'expired') return '<span class="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full">세션 만료</span>';
       return '<span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">세션 없음</span>';
+    }
+
+    function getConnectionByPlatform(platform) {
+      return platformConnections.find(item => item.platform === platform) || null;
     }
 
     async function loadStoreSettings() {
@@ -2055,23 +2069,30 @@ function settingsPage(options: PageOptions) {
           : status === 'error'
             ? '<span class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">오류</span>'
             : '<span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">미연결</span>';
+        const helperText = connection.last_error
+          ? connection.last_error
+          : connection.has_credentials
+            ? '최초 1회 계정 연결 후에는 저장된 연결을 재사용합니다. 세션이 만료되면 세션 갱신 또는 비밀번호 재입력으로 복구할 수 있습니다.'
+            : '최초 1회만 플랫폼 운영 계정을 연결하면 이후에는 저장된 연결과 세션을 재사용합니다.';
+        const connectButtonLabel = connection.has_credentials ? '저장된 계정으로 다시 연결' : '최초 계정 연결';
         const bodyFields = '<div class="grid md:grid-cols-3 gap-3 mb-4">'
           + '<input id="' + platform + '-email" type="email" value="' + (connection.login_email || '') + '" placeholder="로그인 이메일" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
-          + '<input id="' + platform + '-password" type="password" placeholder="' + (connection.has_credentials ? '비밀번호 재입력 필요' : '로그인 비밀번호') + '" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
+          + '<input id="' + platform + '-password" type="password" placeholder="' + (connection.has_credentials ? '비밀번호 변경 시에만 다시 입력' : '로그인 비밀번호') + '" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
           + '<input id="' + platform + '-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
           + '</div>';
         return '<div class="border border-gray-200 rounded-2xl p-5">'
           + '<div class="flex items-center justify-between mb-4"><div class="flex items-center gap-3">'
           + '<div class="w-10 h-10 rounded-full text-white text-xs font-bold flex items-center justify-center" style="background:' + meta.color + '">' + meta.label.slice(0, 2) + '</div>'
-          + '<div><div class="font-semibold text-gray-900">' + meta.label + '</div><div class="text-xs text-gray-400">' + (connection.last_error || '운영 계정을 연결하면 서버 자동 수집 흐름으로 진행됩니다.') + '</div></div></div>'
+          + '<div><div class="font-semibold text-gray-900">' + meta.label + '</div><div class="text-xs text-gray-400">' + helperText + '</div></div></div>'
           + '<div class="flex items-center gap-2">' + statusBadge + getSessionStatusLabel(connection) + '</div></div>'
           + '<div class="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-500">'
-          + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">연결 방식: 서버 자동 연동</span>'
+          + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">연결 방식: 최초 1회 계정 연결 + 서버 세션 재사용</span>'
           + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">최근 세션 확인: ' + (connection.session_last_validated_at ? new Date(connection.session_last_validated_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div>'
           + bodyFields
           + '<div class="flex flex-wrap items-center gap-3">'
-          + '<button id="' + platform + '-connect-btn" onclick="connectPlatform(\\'' + platform + '\\')" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">계정 연결</button>'
+          + '<button id="' + platform + '-connect-btn" onclick="connectPlatform(\\'' + platform + '\\')" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">' + connectButtonLabel + '</button>'
+          + '<button id="' + platform + '-refresh-btn" onclick="refreshPlatformSession(\\'' + platform + '\\')" class="border border-brand-200 text-brand-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-brand-50 transition">세션 갱신</button>'
           + '<button id="' + platform + '-disconnect-btn" onclick="disconnectPlatform(\\'' + platform + '\\')" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">연결 해제</button>'
           + '<span class="text-xs text-gray-400">마지막 동기화: ' + (connection.last_sync_at ? new Date(connection.last_sync_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div></div>';
@@ -2116,12 +2137,27 @@ function settingsPage(options: PageOptions) {
     }
 
     async function connectPlatform(platform) {
+      const existingConnection = getConnectionByPlatform(platform);
       const loginEmail = document.getElementById(platform + '-email').value.trim();
       const loginPassword = document.getElementById(platform + '-password').value;
       const platformStoreId = document.getElementById(platform + '-store-id').value.trim();
 
-      if (!loginEmail || !loginPassword) {
-        showSettingsAlert('플랫폼 이메일과 비밀번호를 모두 입력해주세요. 저장된 비밀번호가 있어도 보안상 다시 입력해야 합니다.', 'error');
+      if (!loginEmail && !existingConnection?.login_email) {
+        showSettingsAlert('최초 연결 시에는 플랫폼 로그인 이메일을 입력해주세요.', 'error');
+        return;
+      }
+
+      if (!loginPassword && !existingConnection?.has_credentials) {
+        showSettingsAlert('최초 연결 시에는 플랫폼 비밀번호 입력이 필요합니다.', 'error');
+        return;
+      }
+
+      if (!loginPassword && existingConnection?.has_credentials) {
+        showSettingsAlert(platformMeta[platform].label + ' 저장된 연결로 세션을 다시 확인합니다. 비밀번호를 바꿨다면 새 비밀번호를 입력한 뒤 다시 시도해주세요.', 'info');
+      }
+
+      if (!loginPassword && loginEmail && existingConnection?.login_email && loginEmail !== existingConnection.login_email) {
+        showSettingsAlert('로그인 이메일을 바꾸려면 비밀번호를 다시 입력해주세요.', 'error');
         return;
       }
 
@@ -2142,12 +2178,40 @@ function settingsPage(options: PageOptions) {
           return;
         }
 
-        showSettingsAlert(platformMeta[platform].label + ' 계정이 연결되었습니다.', 'success');
+        showSettingsAlert(platformMeta[platform].label + ' 계정 연결과 세션 확인이 완료되었습니다.', 'success');
         await loadConnections();
       } catch (error) {
         showSettingsAlert('플랫폼 연결 실패: ' + error.message, 'error');
       } finally {
         setPlatformActionLoading(platform, 'connect', false);
+      }
+    }
+
+    async function refreshPlatformSession(platform) {
+      const connection = getConnectionByPlatform(platform);
+      if (!connection?.has_credentials) {
+        showSettingsAlert('먼저 최초 계정 연결을 완료해주세요.', 'error');
+        return;
+      }
+
+      setPlatformActionLoading(platform, 'refresh', true);
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/refresh-session', {
+          method: 'POST'
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error || !data.success) {
+          showSettingsAlert(data?.message || data?.error?.message || '플랫폼 세션 갱신에 실패했습니다.', 'error');
+          await loadConnections();
+          return;
+        }
+
+        showSettingsAlert(platformMeta[platform].label + ' 세션이 다시 확인되었습니다.', 'success');
+        await loadConnections();
+      } catch (error) {
+        showSettingsAlert('플랫폼 세션 갱신 실패: ' + error.message, 'error');
+      } finally {
+        setPlatformActionLoading(platform, 'refresh', false);
       }
     }
 
