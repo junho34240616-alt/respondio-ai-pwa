@@ -42,8 +42,8 @@ const direct_session_platform_meta: Record<string, {
 }> = {
   baemin: {
     label: '배달의민족',
-    login_url: 'https://self.baemin.com/login',
-    review_url: 'https://self.baemin.com/reviews'
+    login_url: 'https://self.baemin.com/bridge',
+    review_url: 'https://self.baemin.com/'
   },
   coupang_eats: {
     label: '쿠팡이츠',
@@ -2072,7 +2072,7 @@ apiRoutes.get('/crawler/status', async (c) => {
 
 apiRoutes.post('/reviews/sync', async (c) => {
   const auth_user = c.get('auth_user')
-  const body = await read_json_body<{ platform?: string; platforms?: string[]; demo?: boolean; store_id?: number }>(c)
+  const body = await read_json_body<{ platform?: string; platforms?: string[]; store_id?: number }>(c)
   const store_id = resolve_store_id(auth_user, as_number(body.store_id) || null)
   if (!store_id) {
     return json_error(c, 400, 'store_not_found', '동기화할 매장을 찾을 수 없습니다.')
@@ -2089,7 +2089,7 @@ apiRoutes.post('/reviews/sync', async (c) => {
     return json_error(c, 400, 'invalid_platform', '지원하는 플랫폼을 선택해주세요.')
   }
 
-  const demo = body.demo !== false
+  const demo = false
   const results: unknown[] = []
   let fetched = 0
   let inserted = 0
