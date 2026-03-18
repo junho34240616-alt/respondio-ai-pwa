@@ -50,7 +50,7 @@ app.get('/', (c) => {
 app.get('/login', (c) => c.html(loginPage('login')))
 app.get('/signup', (c) => c.html(loginPage('signup')))
 app.get('/dashboard', (c) => c.html(dashboardPage(getPageOptions(c.env))))
-app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env, { appShell: c.req.query('app_shell') === '1' }))))
+app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env))))
 app.get('/billing', (c) => c.html(billingPage(getPageOptions(c.env))))
 app.get('/settings', (c) => c.html(settingsPage(getPageOptions(c.env))))
 app.get('/customers', (c) => c.html(customersPage(getPageOptions(c.env))))
@@ -1070,7 +1070,7 @@ function reviewsPage(options: PageOptions) {
       <h1 class="text-2xl font-bold text-gray-900">리뷰 관리</h1>
       <div class="flex items-center gap-3">
         <button onclick="syncReviews()" class="bg-green-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-600 transition shadow-lg shadow-green-500/30" id="btn-sync">
-          <i class="fas fa-sync-alt mr-2"></i>${options.appShell ? '연결된 플랫폼 열기' : '실제 리뷰 수집'}
+          <i class="fas fa-sync-alt mr-2"></i>실제 리뷰 수집
         </button>
         <button onclick="batchGenerate()" class="border border-brand-500 text-brand-500 px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-50 transition" id="btn-batch-gen">
           <i class="fas fa-wand-magic-sparkles mr-2"></i>AI 일괄 생성
@@ -1156,20 +1156,9 @@ function reviewsPage(options: PageOptions) {
   <script>
     ensureAuthenticated();
 
-    const isAppShell = ${options.appShell ? 'true' : 'false'};
     let allReviews = [];
     let selectedReview = null;
     let platformConnections = [];
-    const mobilePlatformMeta = {
-      baemin: { label: '배달의민족', loginUrl: 'https://self.baemin.com/bridge', reviewUrl: 'https://self.baemin.com/' },
-      coupang_eats: {
-        label: '쿠팡이츠',
-        loginUrl: 'https://store.coupangeats.com/login',
-        reviewUrl: 'https://store.coupangeats.com/reviews',
-        blockedInAppMessage: '현재 쿠팡이츠는 앱 내 WebView 로그인 요청을 차단하고 있습니다. 쿠팡이츠 연동은 별도 대응이 필요해, 지금 버전에서는 배민/요기요 흐름을 우선 지원합니다.'
-      },
-      yogiyo: { label: '요기요', loginUrl: 'https://ceo.yogiyo.co.kr/login', reviewUrl: 'https://ceo.yogiyo.co.kr/reviews' }
-    };
 
     apiFetch('/api/v1/reviews?limit=50').then(r=>r.json()).then(data => {
       allReviews = data.reviews || data || [];
@@ -1183,13 +1172,7 @@ function reviewsPage(options: PageOptions) {
 
     function getLiveReadyPlatforms() {
       return platformConnections
-        .filter(c => {
-          if (c.auth_mode === 'direct_session') {
-            return c.connection_status === 'connected' && c.session_status === 'connected';
-          }
-
-          return c.connection_status === 'connected' && c.has_credentials;
-        })
+        .filter(c => c.connection_status === 'connected' && c.has_credentials)
         .map(c => c.platform);
     }
 
@@ -1207,40 +1190,11 @@ function reviewsPage(options: PageOptions) {
       if (!btn) return;
 
       if (!connectedPlatforms.length) {
-        btn.innerHTML = '<i class="fas fa-link-slash mr-2"></i>' + (isAppShell ? '앱 로그인 필요' : '연결 필요');
+        btn.innerHTML = '<i class="fas fa-link-slash mr-2"></i>연결 필요';
         return;
       }
 
-      const actionLabel = isAppShell ? '열기' : '수집';
-      btn.innerHTML = '<i class="fas ' + (isAppShell ? 'fa-mobile-screen-button' : 'fa-sync-alt') + ' mr-2"></i>' + connectedPlatforms.map(getPlatformLabel).join(', ') + ' ' + actionLabel;
-    }
-
-    function sendNativeBridgeMessage(payload) {
-      if (window.RespondioNativeBridge && typeof window.RespondioNativeBridge.postMessage === 'function') {
-        window.RespondioNativeBridge.postMessage(JSON.stringify(payload));
-        return true;
-      }
-
-      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.respondio) {
-        window.webkit.messageHandlers.respondio.postMessage(payload);
-        return true;
-      }
-
-      if (window.AndroidRespondio && typeof window.AndroidRespondio.postMessage === 'function') {
-        window.AndroidRespondio.postMessage(JSON.stringify(payload));
-        return true;
-      }
-
-      if (window.parent && window.parent !== window && typeof window.parent.postMessage === 'function') {
-        window.parent.postMessage(payload, '*');
-        return true;
-      }
-
-      return false;
-    }
-
-    function getConnectedPlatformDetails(platforms) {
-      return platformConnections.filter((connection) => platforms.includes(connection.platform));
+      btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>' + connectedPlatforms.map(getPlatformLabel).join(', ') + ' 수집';
     }
 
     function renderReviews(reviews) {
@@ -1346,39 +1300,7 @@ function reviewsPage(options: PageOptions) {
       const targetPlatforms = livePlatforms;
 
       if (!targetPlatforms.length) {
-        alert(isAppShell
-          ? '앱에서 플랫폼 직접 로그인을 먼저 완료해야 합니다.'
-          : '실제 수집을 하려면 설정 화면에서 먼저 연결된 플랫폼이 1개 이상 있어야 합니다.');
-        return;
-      }
-
-      if (isAppShell) {
-        const [primaryConnection] = getConnectedPlatformDetails(targetPlatforms);
-        const platform = primaryConnection?.platform || targetPlatforms[0];
-        const platformMeta = mobilePlatformMeta[platform];
-
-        if (!platformMeta) {
-          alert('앱에서 열 수 있는 플랫폼 정보를 찾지 못했습니다.');
-          return;
-        }
-
-        const delivered = sendNativeBridgeMessage({
-          type: 'open_platform_page',
-          platform,
-          platformStoreId: primaryConnection?.platform_store_id || null,
-          pageType: 'review',
-          url: platformMeta.reviewUrl,
-          reviewUrl: platformMeta.reviewUrl,
-          loginUrl: platformMeta.loginUrl,
-          callbackPath: '/api/v1/platform_connections/' + platform + '/session-state'
-        });
-
-        if (!delivered) {
-          alert('앱 브리지가 연결되지 않아 운영 화면을 열지 못했습니다.');
-          return;
-        }
-
-        alert(getPlatformLabel(platform) + ' 운영 화면을 앱 안에서 열었습니다.\\n\\n리뷰 목록이 보이면 다음 단계에서 이 세션으로 실제 수집을 연결하겠습니다.');
+        alert('실제 수집을 하려면 설정 화면에서 먼저 연결된 플랫폼이 1개 이상 있어야 합니다.');
         return;
       }
 
@@ -2033,16 +1955,11 @@ function settingsPage(options: PageOptions) {
         <div class="flex items-center justify-between mb-4">
           <div>
             <h2 class="text-lg font-bold text-gray-900">플랫폼 연결</h2>
-            <p class="text-sm text-gray-500 mt-1">새 방향은 사용자 직접 로그인 세션입니다. 모바일 앱/WebView 연결이 붙으면 직접 로그인 세션을 쓰고, 그 전까지는 레거시 자동 로그인도 함께 유지합니다.</p>
+            <p class="text-sm text-gray-500 mt-1">경쟁업체와 같은 방식으로 플랫폼 운영 계정을 연동하면 서버가 리뷰 수집과 답변 등록을 자동화합니다.</p>
           </div>
-          <div class="flex items-center gap-2">
-            <a href="/mobile/app-shell" class="border border-brand-200 text-brand-600 px-4 py-2 rounded-xl text-sm hover:bg-brand-50 transition">
-              모바일 앱 셸
-            </a>
-            <button onclick="loadConnections()" class="border border-gray-200 text-gray-600 px-4 py-2 rounded-xl text-sm hover:bg-gray-50 transition">
-              상태 새로고침
-            </button>
-          </div>
+          <button onclick="loadConnections()" class="border border-gray-200 text-gray-600 px-4 py-2 rounded-xl text-sm hover:bg-gray-50 transition">
+            상태 새로고침
+          </button>
         </div>
         <div id="platform-connection-list" class="space-y-4">
           <div class="text-sm text-gray-400">플랫폼 연결 상태를 불러오는 중...</div>
@@ -2095,10 +2012,6 @@ function settingsPage(options: PageOptions) {
       if (radio) radio.checked = true;
     }
 
-    function getConnectionModeLabel(connection) {
-      return connection?.auth_mode === 'direct_session' ? '직접 로그인 세션' : '자동 로그인(레거시)';
-    }
-
     function getSessionStatusLabel(connection) {
       const status = connection?.session_status || 'inactive';
       if (status === 'connected') return '<span class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">세션 활성</span>';
@@ -2132,34 +2045,23 @@ function settingsPage(options: PageOptions) {
           : status === 'error'
             ? '<span class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">오류</span>'
             : '<span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">미연결</span>';
-        const directSessionMode = connection.auth_mode === 'direct_session';
-        const modeControls = '<div class="flex flex-wrap items-center gap-2 mt-2">'
-          + '<button onclick="setAuthMode(\\'' + platform + '\\', \\'direct_session\\')" class="' + (directSessionMode ? 'bg-brand-500 text-white border-brand-500 ' : 'bg-white text-gray-600 border-gray-200 ') + 'border px-3 py-1.5 rounded-lg text-xs font-semibold transition">직접 로그인 세션</button>'
-          + '<button onclick="setAuthMode(\\'' + platform + '\\', \\'credentials\\')" class="' + (!directSessionMode ? 'bg-brand-50 text-brand-600 border-brand-200 ' : 'bg-white text-gray-600 border-gray-200 ') + 'border px-3 py-1.5 rounded-lg text-xs font-semibold transition">자동 로그인(레거시)</button>'
+        const bodyFields = '<div class="grid md:grid-cols-3 gap-3 mb-4">'
+          + '<input id="' + platform + '-email" type="email" value="' + (connection.login_email || '') + '" placeholder="로그인 이메일" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
+          + '<input id="' + platform + '-password" type="password" placeholder="' + (connection.has_credentials ? '비밀번호 재입력 필요' : '로그인 비밀번호') + '" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
+          + '<input id="' + platform + '-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
           + '</div>';
-        const bodyFields = directSessionMode
-          ? '<div class="rounded-2xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-800 mb-4">'
-            + '<div class="font-semibold mb-1">모바일 직접 로그인 세션 모드</div>'
-            + '<div>최종 목표는 사용자가 모바일 앱/WebView에서 직접 로그인하고, 로그인한 동안만 세션을 유지하는 구조입니다.</div>'
-            + '<div class="mt-2 text-blue-700">현재 웹앱 토대는 준비 중이며, 연결 완료 처리는 모바일 앱/WebView 연동 단계에서 붙습니다.</div>'
-            + '</div>'
-          : '<div class="grid md:grid-cols-3 gap-3 mb-4">'
-            + '<input id="' + platform + '-email" type="email" value="' + (connection.login_email || '') + '" placeholder="로그인 이메일" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
-            + '<input id="' + platform + '-password" type="password" placeholder="' + (connection.has_credentials ? '비밀번호 재입력 필요' : '로그인 비밀번호') + '" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
-            + '<input id="' + platform + '-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
-            + '</div>';
         return '<div class="border border-gray-200 rounded-2xl p-5">'
           + '<div class="flex items-center justify-between mb-4"><div class="flex items-center gap-3">'
           + '<div class="w-10 h-10 rounded-full text-white text-xs font-bold flex items-center justify-center" style="background:' + meta.color + '">' + meta.label.slice(0, 2) + '</div>'
-          + '<div><div class="font-semibold text-gray-900">' + meta.label + '</div><div class="text-xs text-gray-400">' + (connection.last_error || '운영 계정 연결 후 실제 수집 가능') + '</div>' + modeControls + '</div></div>'
+          + '<div><div class="font-semibold text-gray-900">' + meta.label + '</div><div class="text-xs text-gray-400">' + (connection.last_error || '운영 계정을 연결하면 서버 자동 수집 흐름으로 진행됩니다.') + '</div></div></div>'
           + '<div class="flex items-center gap-2">' + statusBadge + getSessionStatusLabel(connection) + '</div></div>'
           + '<div class="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-500">'
-          + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">연결 방식: ' + getConnectionModeLabel(connection) + '</span>'
+          + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">연결 방식: 서버 자동 연동</span>'
           + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">최근 세션 확인: ' + (connection.session_last_validated_at ? new Date(connection.session_last_validated_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div>'
           + bodyFields
           + '<div class="flex flex-wrap items-center gap-3">'
-          + '<button id="' + platform + '-connect-btn" onclick="connectPlatform(\\'' + platform + '\\')" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">' + (directSessionMode ? '직접 로그인 준비' : '계정 연결') + '</button>'
+          + '<button id="' + platform + '-connect-btn" onclick="connectPlatform(\\'' + platform + '\\')" class="bg-brand-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">계정 연결</button>'
           + '<button id="' + platform + '-disconnect-btn" onclick="disconnectPlatform(\\'' + platform + '\\')" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">연결 해제</button>'
           + '<span class="text-xs text-gray-400">마지막 동기화: ' + (connection.last_sync_at ? new Date(connection.last_sync_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div></div>';
@@ -2203,48 +2105,7 @@ function settingsPage(options: PageOptions) {
       }
     }
 
-    async function setAuthMode(platform, authMode) {
-      try {
-        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/auth-mode', {
-          method: 'POST',
-          body: JSON.stringify({ auth_mode: authMode })
-        });
-        const data = await readJsonResponse(response);
-        if (!response.ok || data.error) {
-          showSettingsAlert(data?.error?.message || '연결 방식 변경에 실패했습니다.', 'error');
-          return;
-        }
-
-        showSettingsAlert(data.message || '연결 방식을 변경했습니다.', 'success');
-        await loadConnections();
-      } catch (error) {
-        showSettingsAlert('연결 방식 변경 실패: ' + error.message, 'error');
-      }
-    }
-
     async function connectPlatform(platform) {
-      const connection = platformConnections.find(item => item.platform === platform) || {};
-      if (connection.auth_mode === 'direct_session') {
-        try {
-          const response = await apiFetch('/api/v1/platform_connections/' + platform + '/connect', {
-            method: 'POST',
-            body: JSON.stringify({ auth_mode: 'direct_session' })
-          });
-          const data = await readJsonResponse(response);
-          if (!response.ok || data.error) {
-            showSettingsAlert(data?.error?.message || '직접 로그인 세션 준비에 실패했습니다.', 'error');
-            return;
-          }
-
-          showSettingsAlert(data.message || '직접 로그인 세션 모드가 준비되었습니다. 다음 단계는 모바일 앱/WebView 연결입니다.', 'info');
-          await loadConnections();
-          return;
-        } catch (error) {
-          showSettingsAlert('직접 로그인 세션 준비 실패: ' + error.message, 'error');
-          return;
-        }
-      }
-
       const loginEmail = document.getElementById(platform + '-email').value.trim();
       const loginPassword = document.getElementById(platform + '-password').value;
       const platformStoreId = document.getElementById(platform + '-store-id').value.trim();
@@ -2352,7 +2213,8 @@ function mobileSessionCenterPage(isAppShell = false) {
         label: '쿠팡이츠',
         color: '#E4002B',
         loginUrl: 'https://store.coupangeats.com/login',
-        reviewUrl: 'https://store.coupangeats.com/reviews'
+        reviewUrl: 'https://store.coupangeats.com/reviews',
+        blockedInAppMessage: '현재 쿠팡이츠는 앱 내 WebView 로그인 요청을 차단하고 있습니다. 이 버전에서는 배민/요기요 흐름을 우선 지원하고, 쿠팡이츠는 별도 대응이 필요합니다.'
       },
       yogiyo: {
         label: '요기요',
