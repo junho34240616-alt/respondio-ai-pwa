@@ -452,8 +452,8 @@ async function get_live_session_state_from_crawler(c: any, platform: string, sto
     success: active,
     session,
     message: active
-      ? '직접 로그인 세션이 활성 상태입니다.'
-      : result?.message || '현재 활성 직접 로그인 세션이 없습니다. 모바일 앱에서 다시 로그인해주세요.'
+      ? '플랫폼 운영 세션이 활성 상태입니다.'
+      : result?.message || '현재 활성 운영 세션이 없습니다.'
   }
 }
 
@@ -500,6 +500,29 @@ async function ensure_live_platform_session(c: any, store_id: number, platform: 
 
   if (!connection?.login_email || !connection?.login_password_encrypted) {
     return { success: false, error: '플랫폼 계정이 연결되어 있지 않습니다.' }
+  }
+
+  try {
+    const session_state = await get_live_session_state_from_crawler(c, platform, store_id)
+    if (session_state.success) {
+      const updated_connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
+        connection_status: 'connected',
+        auth_mode: 'credentials',
+        session_status: 'connected',
+        session_connected_at: connection.session_connected_at || new Date().toISOString(),
+        session_last_validated_at: new Date().toISOString(),
+        last_error: null,
+        touch_sync_time: true
+      })
+
+      return {
+        success: true,
+        error: null,
+        connection: sanitize_platform_connection(updated_connection)
+      }
+    }
+  } catch (error: any) {
+    // 세션 상태 조회 실패 시에는 저장된 자격증명으로 재로그인을 시도한다.
   }
 
   const encryption_key = get_credentials_encryption_key(c)
@@ -1977,7 +2000,7 @@ apiRoutes.post('/platform_connections/:platform/disconnect', async (c) => {
     connection_status: 'disconnected',
     login_email: null,
     login_password_encrypted: null,
-    auth_mode: 'direct_session',
+    auth_mode: 'credentials',
     session_status: 'inactive',
     session_connected_at: null,
     session_last_validated_at: null,
