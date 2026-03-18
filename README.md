@@ -8,8 +8,8 @@
 ## Current Architecture Direction
 - **메인 웹앱/API는 Hono + D1 + Cloudflare Pages/Workers 유지**
 - **크롤러는 Node.js + Playwright 별도 프로세스로 유지**
-- **플랫폼 연결 방향은 `서버 자동 로그인`에서 `사용자 직접 로그인 세션`으로 전환 중**
-- **최종 목표는 모바일 앱/WebView에서 직접 로그인하고, 로그인된 동안만 리뷰 수집/답변 등록**
+- **사용자 이용 경로는 PC/모바일 브라우저에서 웹앱 접속이 기본**
+- **플랫폼 연결은 경쟁업체와 유사한 `서버 자동 로그인 + 서버 수집/등록` 방향으로 고도화**
 - **Next.js + Redis + R2 + worker 분리는 장기 확장안**이며, 즉시 마이그레이션 대상이 아님
 - **젠스파크 AI개발자 배포 기준으로는 현재 구조를 고도화하는 편이 더 안전**
 
@@ -104,22 +104,17 @@
 ## 현재 제한사항
 1. **JWT access token + refresh token/httpOnly cookie는 구현됨** - 다만 기기별 세션 관리/강제 로그아웃 UI는 아직 없음
 2. **API 스코프는 사용자/매장 기준으로 정리됨** - 일부 UI 문구와 시드 데이터는 여전히 데모 전제
-3. **플랫폼 연결 구조 전환 중** - 현재는 `credentials`와 `direct_session` 두 모드를 동시에 이해하지만, 모바일 직접 로그인 앱/WebView는 아직 구현 전
+3. **플랫폼 연결은 서버 자동화가 기본** - 운영 계정을 연결하면 크롤러가 로그인/리뷰 수집/답변 등록을 수행
 4. **크롤러 URL은 설정 가능** - 프로덕션에서는 `CRAWLER_API_BASE`, `CRAWLER_SHARED_SECRET`, `CREDENTIALS_ENCRYPTION_KEY` 배선이 필요
 5. **PortOne 결제는 선택 기능** - 지금은 `PORTONE_*` 값 없이도 무료 베타 모드로 배포 가능하며, 결제 화면은 베타 안내로 동작
 6. **테스트는 확장됨** - auth/API 스모크와 로컬 Cloudflare+Crawler 브라우저 E2E(`npm run test:e2e`)가 추가됨
 7. **PWA는 부분 구현** - 서비스워커 등록은 추가됐지만 설치/오프라인 동작 검증은 아직 필요
 
-## Direct Session Roadmap
-- 세부 설계 문서: [docs/MOBILE_DIRECT_LOGIN_ARCHITECTURE.md](/Users/junho/Documents/Respondio%20/docs/MOBILE_DIRECT_LOGIN_ARCHITECTURE.md)
-- 현재 추가된 토대:
-  - 플랫폼 연결에 `auth_mode`, `session_status`, `session_connected_at`, `session_last_validated_at` 저장
-  - 크롤러 세션을 `platform + store_id` 단위로 분리
-  - 리뷰 수집 시 `direct_session` 모드면 서버 재로그인 대신 활성 세션을 우선 확인
-- 아직 남은 핵심 작업:
-  - 모바일 앱/WebView 로그인 UX
-  - 세션 연결/만료/재로그인 흐름
-  - 레거시 이메일+비밀번호 연결 제거
+## 현재 집중 범위
+- 웹앱 메인 UX 정리
+- 플랫폼 운영 계정 연동 안정화
+- 서버 자동 리뷰 수집/답변 등록 성공률 개선
+- 배민/쿠팡이츠 로그인 차단 이슈 별도 대응
 
 ## Required Environment Variables
 - **Cloudflare Pages / Workers secrets**: `OPENAI_API_KEY`, `JWT_SECRET`, `CRAWLER_SHARED_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`

@@ -140,7 +140,7 @@
 - 로그인/회원가입은 실제 API 인증이며 refresh token/httpOnly cookie와 초기 세션 복구도 들어갔지만, 기기별 세션 관리 UI는 아직 없음
 - 크롤러 URL은 설정 가능하고 shared secret도 연동됐지만 프로덕션 환경변수/시크릿 배선은 아직 필요
 - 플랫폼 자격증명은 `CREDENTIALS_ENCRYPTION_KEY` 기반으로 암호화 저장되며, 로컬 운영 경로 E2E는 `CRAWLER_TEST_MODE=1`로 검증 가능
-- 플랫폼 연결은 이제 `credentials`와 `direct_session` 두 모델을 모두 이해하지만, 모바일 직접 로그인 앱/WebView는 아직 구현 전
+- 플랫폼 연결 기본 방향은 다시 `credentials` 기반 서버 자동화로 정리 중
 - 일부 UI 문구/시드 데이터는 여전히 데모 전제이며, 실제 운영 흐름과 완전히 동기화되어 있지 않음
 - PortOne 결제 UI/API/웹훅 기본 경로는 추가됐지만, 값이 비어 있으면 앱은 무료 베타 모드로 동작하도록 정리됨
 
@@ -153,8 +153,8 @@
 ## 남은 과제 / 개선 포인트 (우선순위 재정렬)
 1. **Cloudflare 프로덕션 배포 정리**: D1 실제 DB, 시크릿, 환경별 crawler URL, 배포 스모크체크
 2. **세션 보강**: refresh token / httpOnly cookie / 자동 로그아웃 및 만료 처리 UX
-3. **모바일 직접 로그인 세션 구현**: 모바일 앱/WebView 로그인, 세션 검증, 연결/만료 UX
-4. **실제 크롤링 전환**: 데모/실모드 분리 유지, 플랫폼 연결 UX, 외부 크롤러 배포 환경 정리
+3. **실제 크롤링 전환**: 데모 제거, 플랫폼 연결 UX 정리, 외부 크롤러 배포 환경 정리
+4. **배민/쿠팡 플랫폼 연동 안정화**: 로그인 차단/추가 인증 대응, 성공률 개선
 5. **입력 검증/에러 포맷/보안 보강**: request validation, 공통 에러 응답, 로그 마스킹
 6. **PortOne 실운영 전환**: 실제 Store/Channel/API Secret 연결, webhook endpoint 공개, 결제 성공/실패 운영 점검
 7. **테스트 코드 확대**: API 핵심 유닛 테스트 확대, 현재 로컬 browser E2E를 CI 친화적으로 정리
