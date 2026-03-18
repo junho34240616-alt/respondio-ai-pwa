@@ -19,6 +19,7 @@ type Bindings = {
 
 type PageOptions = {
   billingEnabled: boolean
+  appShell?: boolean
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -32,9 +33,11 @@ function isBillingEnabled(env: Partial<Bindings>) {
   return !!(env.PORTONE_STORE_ID && env.PORTONE_CHANNEL_KEY && env.PORTONE_API_SECRET)
 }
 
-function getPageOptions(env: Partial<Bindings>): PageOptions {
+function getPageOptions(env: Partial<Bindings>, overrides: Partial<PageOptions> = {}): PageOptions {
   return {
-    billingEnabled: isBillingEnabled(env)
+    billingEnabled: isBillingEnabled(env),
+    appShell: false,
+    ...overrides
   }
 }
 
@@ -47,7 +50,7 @@ app.get('/', (c) => {
 app.get('/login', (c) => c.html(loginPage('login')))
 app.get('/signup', (c) => c.html(loginPage('signup')))
 app.get('/dashboard', (c) => c.html(dashboardPage(getPageOptions(c.env))))
-app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env))))
+app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env, { appShell: c.req.query('app_shell') === '1' }))))
 app.get('/billing', (c) => c.html(billingPage(getPageOptions(c.env))))
 app.get('/settings', (c) => c.html(settingsPage(getPageOptions(c.env))))
 app.get('/customers', (c) => c.html(customersPage(getPageOptions(c.env))))
@@ -1066,12 +1069,8 @@ function reviewsPage(options: PageOptions) {
     <div class="flex items-center justify-between mb-6">
       <h1 class="text-2xl font-bold text-gray-900">리뷰 관리</h1>
       <div class="flex items-center gap-3">
-        <select id="sync-mode" class="border border-gray-200 rounded-xl px-3 py-2.5 text-sm bg-white focus:ring-2 focus:ring-brand-500 outline-none">
-          <option value="demo">데모 수집</option>
-          <option value="live">실제 수집</option>
-        </select>
         <button onclick="syncReviews()" class="bg-green-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-600 transition shadow-lg shadow-green-500/30" id="btn-sync">
-          <i class="fas fa-sync-alt mr-2"></i>리뷰 수집
+          <i class="fas fa-sync-alt mr-2"></i>${options.appShell ? '연결된 플랫폼 열기' : '실제 리뷰 수집'}
         </button>
         <button onclick="batchGenerate()" class="border border-brand-500 text-brand-500 px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-50 transition" id="btn-batch-gen">
           <i class="fas fa-wand-magic-sparkles mr-2"></i>AI 일괄 생성
@@ -1157,9 +1156,20 @@ function reviewsPage(options: PageOptions) {
   <script>
     ensureAuthenticated();
 
+    const isAppShell = ${options.appShell ? 'true' : 'false'};
     let allReviews = [];
     let selectedReview = null;
     let platformConnections = [];
+    const mobilePlatformMeta = {
+      baemin: { label: '배달의민족', loginUrl: 'https://self.baemin.com/bridge', reviewUrl: 'https://self.baemin.com/' },
+      coupang_eats: {
+        label: '쿠팡이츠',
+        loginUrl: 'https://store.coupangeats.com/login',
+        reviewUrl: 'https://store.coupangeats.com/reviews',
+        blockedInAppMessage: '현재 쿠팡이츠는 앱 내 WebView 로그인 요청을 차단하고 있습니다. 쿠팡이츠 연동은 별도 대응이 필요해, 지금 버전에서는 배민/요기요 흐름을 우선 지원합니다.'
+      },
+      yogiyo: { label: '요기요', loginUrl: 'https://ceo.yogiyo.co.kr/login', reviewUrl: 'https://ceo.yogiyo.co.kr/reviews' }
+    };
 
     apiFetch('/api/v1/reviews?limit=50').then(r=>r.json()).then(data => {
       allReviews = data.reviews || data || [];
@@ -1168,10 +1178,7 @@ function reviewsPage(options: PageOptions) {
 
     apiFetch('/api/v1/platform_connections').then(r=>r.json()).then(data => {
       platformConnections = data.connections || [];
-      const connectedPlatforms = getLiveReadyPlatforms();
-      const hasLiveConnection = connectedPlatforms.length > 0;
-      document.getElementById('sync-mode').value = hasLiveConnection ? 'live' : 'demo';
-      updateSyncButtonLabel(connectedPlatforms);
+      updateSyncButtonLabel(getLiveReadyPlatforms());
     }).catch(() => {});
 
     function getLiveReadyPlatforms() {
@@ -1196,27 +1203,45 @@ function reviewsPage(options: PageOptions) {
     }
 
     function updateSyncButtonLabel(connectedPlatforms) {
-      const syncModeEl = document.getElementById('sync-mode');
       const btn = document.getElementById('btn-sync');
-      if (!syncModeEl || !btn) return;
-
-      const isLive = syncModeEl.value === 'live';
-      if (!isLive) {
-        btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>리뷰 수집';
-        return;
-      }
+      if (!btn) return;
 
       if (!connectedPlatforms.length) {
-        btn.innerHTML = '<i class="fas fa-link-slash mr-2"></i>연결 필요';
+        btn.innerHTML = '<i class="fas fa-link-slash mr-2"></i>' + (isAppShell ? '앱 로그인 필요' : '연결 필요');
         return;
       }
 
-      btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>' + connectedPlatforms.map(getPlatformLabel).join(', ') + ' 수집';
+      const actionLabel = isAppShell ? '열기' : '수집';
+      btn.innerHTML = '<i class="fas ' + (isAppShell ? 'fa-mobile-screen-button' : 'fa-sync-alt') + ' mr-2"></i>' + connectedPlatforms.map(getPlatformLabel).join(', ') + ' ' + actionLabel;
     }
 
-    document.getElementById('sync-mode').addEventListener('change', function() {
-      updateSyncButtonLabel(getLiveReadyPlatforms());
-    });
+    function sendNativeBridgeMessage(payload) {
+      if (window.RespondioNativeBridge && typeof window.RespondioNativeBridge.postMessage === 'function') {
+        window.RespondioNativeBridge.postMessage(JSON.stringify(payload));
+        return true;
+      }
+
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.respondio) {
+        window.webkit.messageHandlers.respondio.postMessage(payload);
+        return true;
+      }
+
+      if (window.AndroidRespondio && typeof window.AndroidRespondio.postMessage === 'function') {
+        window.AndroidRespondio.postMessage(JSON.stringify(payload));
+        return true;
+      }
+
+      if (window.parent && window.parent !== window && typeof window.parent.postMessage === 'function') {
+        window.parent.postMessage(payload, '*');
+        return true;
+      }
+
+      return false;
+    }
+
+    function getConnectedPlatformDetails(platforms) {
+      return platformConnections.filter((connection) => platforms.includes(connection.platform));
+    }
 
     function renderReviews(reviews) {
       const container = document.getElementById('review-list');
@@ -1317,13 +1342,43 @@ function reviewsPage(options: PageOptions) {
 
     async function syncReviews() {
       const btn = document.getElementById('btn-sync');
-      const syncMode = document.getElementById('sync-mode').value;
-      const demo = syncMode !== 'live';
       const livePlatforms = getLiveReadyPlatforms();
-      const targetPlatforms = demo ? ['baemin', 'coupang_eats', 'yogiyo'] : livePlatforms;
+      const targetPlatforms = livePlatforms;
 
-      if (!demo && !targetPlatforms.length) {
-        alert('실제 수집을 하려면 설정 화면에서 먼저 연결된 플랫폼이 1개 이상 있어야 합니다.');
+      if (!targetPlatforms.length) {
+        alert(isAppShell
+          ? '앱에서 플랫폼 직접 로그인을 먼저 완료해야 합니다.'
+          : '실제 수집을 하려면 설정 화면에서 먼저 연결된 플랫폼이 1개 이상 있어야 합니다.');
+        return;
+      }
+
+      if (isAppShell) {
+        const [primaryConnection] = getConnectedPlatformDetails(targetPlatforms);
+        const platform = primaryConnection?.platform || targetPlatforms[0];
+        const platformMeta = mobilePlatformMeta[platform];
+
+        if (!platformMeta) {
+          alert('앱에서 열 수 있는 플랫폼 정보를 찾지 못했습니다.');
+          return;
+        }
+
+        const delivered = sendNativeBridgeMessage({
+          type: 'open_platform_page',
+          platform,
+          platformStoreId: primaryConnection?.platform_store_id || null,
+          pageType: 'review',
+          url: platformMeta.reviewUrl,
+          reviewUrl: platformMeta.reviewUrl,
+          loginUrl: platformMeta.loginUrl,
+          callbackPath: '/api/v1/platform_connections/' + platform + '/session-state'
+        });
+
+        if (!delivered) {
+          alert('앱 브리지가 연결되지 않아 운영 화면을 열지 못했습니다.');
+          return;
+        }
+
+        alert(getPlatformLabel(platform) + ' 운영 화면을 앱 안에서 열었습니다.\\n\\n리뷰 목록이 보이면 다음 단계에서 이 세션으로 실제 수집을 연결하겠습니다.');
         return;
       }
 
@@ -1338,7 +1393,7 @@ function reviewsPage(options: PageOptions) {
           try {
             const res = await apiFetch('/api/v1/reviews/sync', {
               method: 'POST',
-              body: JSON.stringify({ platform, demo })
+              body: JSON.stringify({ platform })
             });
             const data = await res.json();
             if (data.inserted) totalInserted += data.inserted;
@@ -1349,18 +1404,19 @@ function reviewsPage(options: PageOptions) {
                 : data?.error?.message || '수집 실패';
               failures.push(getPlatformLabel(platform) + ': ' + errorMessage);
             }
-          } catch(e) { console.error(platform, e); }
+          } catch(e) {
+            totalFailed += 1;
+            failures.push(getPlatformLabel(platform) + ': ' + e.message);
+          }
         }
         if (totalInserted > 0) {
-          const summary = demo
-            ? totalInserted + '건의 새 리뷰가 수집되었습니다!'
-            : totalInserted + '건의 새 리뷰가 수집되었습니다!\\n실행 플랫폼: ' + targetPlatforms.map(getPlatformLabel).join(', ');
+          const summary = totalInserted + '건의 새 리뷰가 수집되었습니다!\\n실행 플랫폼: ' + targetPlatforms.map(getPlatformLabel).join(', ');
           alert(summary);
           location.reload();
-        } else if (!demo && totalFailed > 0) {
+        } else if (totalFailed > 0) {
           alert('실제 수집에 실패한 플랫폼이 있습니다.\\n\\n' + failures.join('\\n\\n'));
         } else {
-          alert('새로운 리뷰가 없거나 크롤러 서버가 실행 중이 아닙니다.\\n\\n크롤러 시작: pm2 start crawler/ecosystem.config.cjs');
+          alert('새로운 리뷰가 없습니다.');
         }
       } catch(e) { alert('리뷰 수집 실패: ' + e.message); }
       finally {
@@ -2289,8 +2345,8 @@ function mobileSessionCenterPage(isAppShell = false) {
       baemin: {
         label: '배달의민족',
         color: '#00C4B4',
-        loginUrl: 'https://self.baemin.com/login',
-        reviewUrl: 'https://self.baemin.com/reviews'
+        loginUrl: 'https://self.baemin.com/bridge',
+        reviewUrl: 'https://self.baemin.com/'
       },
       coupang_eats: {
         label: '쿠팡이츠',
@@ -2369,6 +2425,9 @@ function mobileSessionCenterPage(isAppShell = false) {
           + '</div>'
           + '<div class="${actionRowClass}">'
           + '<button onclick="openNativeLogin(\\'' + platform + '\\')" class="${actionButtonWidthClass} bg-brand-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">앱에서 바로 로그인</button>'
+          + (connection.session_status === 'connected'
+            ? '<button onclick="openNativeReview(\\'' + platform + '\\')" class="${actionButtonWidthClass} border border-brand-200 text-brand-600 px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-50 transition">앱에서 운영 화면 열기</button>'
+            : '')
           + '<button onclick="loadConnections()" class="${actionButtonWidthClass} border border-gray-200 text-gray-600 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">상태 확인</button>'
           + '<span class="text-xs text-gray-400 leading-5">세션 연결 시각: ' + (connection.session_connected_at ? new Date(connection.session_connected_at).toLocaleString('ko-KR') : '-') + '</span>'
           + '</div></div>';
@@ -2411,6 +2470,12 @@ function mobileSessionCenterPage(isAppShell = false) {
     async function openNativeLogin(platform) {
       const meta = mobilePlatformMeta[platform];
       const storeId = document.getElementById(platform + '-mobile-store-id').value.trim();
+
+      if (isAppShell && meta?.blockedInAppMessage) {
+        showMobileSessionAlert(meta.blockedInAppMessage, 'info');
+        return;
+      }
+
       try {
         const response = await apiFetch('/api/v1/platform_connections/' + platform + '/connect', {
           method: 'POST',
@@ -2450,6 +2515,34 @@ function mobileSessionCenterPage(isAppShell = false) {
         showMobileSessionAlert('현재 브라우저에는 앱 브리지가 연결되어 있지 않습니다. 이 화면은 향후 모바일 앱/WebView에서 사용됩니다.', 'info');
       } else {
         showMobileSessionAlert(meta.label + ' 로그인 창을 여는 중입니다. 앱 로그인 화면에서 직접 인증을 완료해 주세요.', 'success');
+      }
+    }
+
+    function openNativeReview(platform) {
+      const meta = mobilePlatformMeta[platform];
+      const storeId = document.getElementById(platform + '-mobile-store-id').value.trim();
+      let delivered = false;
+
+      try {
+        delivered = sendNativeBridgeMessage({
+          type: 'open_platform_page',
+          platform,
+          platformStoreId: storeId || null,
+          pageType: 'review',
+          url: meta.reviewUrl,
+          reviewUrl: meta.reviewUrl,
+          loginUrl: meta.loginUrl,
+          callbackPath: '/api/v1/platform_connections/' + platform + '/session-state'
+        });
+      } catch (error) {
+        showMobileSessionAlert('앱 브리지 호출 실패: ' + (error?.message || 'unknown error'), 'error');
+        return;
+      }
+
+      if (!delivered) {
+        showMobileSessionAlert('현재 브라우저에는 앱 브리지가 연결되어 있지 않습니다. 이 버튼은 모바일 앱/WebView에서 사용됩니다.', 'info');
+      } else {
+        showMobileSessionAlert(meta.label + ' 리뷰 화면을 여는 중입니다. 앱 안에서 실제 목록이 보이는지 확인해 주세요.', 'success');
       }
     }
 
