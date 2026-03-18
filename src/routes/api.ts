@@ -1867,9 +1867,9 @@ apiRoutes.post('/platform_connections/:platform/connect', async (c) => {
     })
   }
 
-  if (!login_email || !login_password) {
-    return json_error(c, 400, 'credentials_required', '플랫폼 로그인 이메일과 비밀번호가 필요합니다.')
-  }
+  const existing_connection = await load_platform_connection(c.env.DB, store_id, platform)
+  const normalized_login_email = login_email?.trim() || String(existing_connection?.login_email || '').trim()
+  const provided_login_password = login_password || ''
 
   const encryption_key = get_credentials_encryption_key(c)
   if (!encryption_key) {
@@ -1877,16 +1877,35 @@ apiRoutes.post('/platform_connections/:platform/connect', async (c) => {
   }
 
   try {
-    const encrypted_password = await encrypt_secret(login_password, encryption_key)
+    if (!normalized_login_email) {
+      return json_error(c, 400, 'credentials_required', '플랫폼 로그인 이메일이 필요합니다.')
+    }
+
+    if (!provided_login_password && !existing_connection?.login_password_encrypted) {
+      return json_error(c, 400, 'credentials_required', '최초 연결 시에는 플랫폼 비밀번호 입력이 필요합니다.')
+    }
+
+    if (!provided_login_password && login_email?.trim() && login_email.trim() !== String(existing_connection?.login_email || '').trim()) {
+      return json_error(c, 400, 'password_required_for_email_change', '로그인 이메일을 바꾸려면 비밀번호를 다시 입력해주세요.')
+    }
+
+    const decrypted_password = provided_login_password
+      ? provided_login_password
+      : await decrypt_secret(String(existing_connection?.login_password_encrypted || ''), encryption_key)
+
+    const encrypted_password = provided_login_password
+      ? await encrypt_secret(provided_login_password, encryption_key)
+      : String(existing_connection?.login_password_encrypted || '')
+
     const login_result = await login_platform_via_crawler(c, platform, store_id, {
-      email: login_email,
-      password: login_password
+      email: normalized_login_email,
+      password: decrypted_password
     })
 
     const connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
       connection_status: login_result.success ? 'connected' : 'error',
       platform_store_id: platform_store_id?.trim() || null,
-      login_email: login_email.trim(),
+      login_email: normalized_login_email,
       login_password_encrypted: encrypted_password,
       auth_mode: 'credentials',
       session_status: login_result.success ? 'connected' : 'error',
@@ -1904,6 +1923,28 @@ apiRoutes.post('/platform_connections/:platform/connect', async (c) => {
   } catch (error: any) {
     return json_error(c, 400, 'platform_connect_failed', error.message)
   }
+})
+
+apiRoutes.post('/platform_connections/:platform/refresh-session', async (c) => {
+  const auth_user = c.get('auth_user')
+  const store_id = resolve_store_id(auth_user, null)
+  if (!store_id) {
+    return json_error(c, 400, 'store_not_found', '매장을 찾을 수 없습니다.')
+  }
+
+  const platform = c.req.param('platform')
+  if (!supported_platforms.has(platform)) {
+    return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
+  }
+
+  const result = await ensure_live_platform_session(c, store_id, platform)
+  return c.json({
+    success: result.success,
+    connection: result.connection || null,
+    message: result.success
+      ? '플랫폼 세션을 다시 확인했습니다.'
+      : result.error || '플랫폼 세션 갱신에 실패했습니다.'
+  }, result.success ? 200 : 400)
 })
 
 apiRoutes.post('/platform_connections/:platform/auth-mode', async (c) => {
