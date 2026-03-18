@@ -178,6 +178,19 @@ async function read_json_body<T>(c: any): Promise<T> {
   return c.req.json().catch(() => ({} as T))
 }
 
+async function read_json_or_text(response: Response) {
+  const text = await response.text().catch(() => '')
+  if (!text) {
+    return { data: null as any, text: '' }
+  }
+
+  try {
+    return { data: JSON.parse(text) as any, text }
+  } catch {
+    return { data: null as any, text }
+  }
+}
+
 async function load_auth_user(db: D1Database, user_id: number): Promise<AuthUser | null> {
   const user = await db.prepare('SELECT id, email, name, role, status FROM users WHERE id = ?').bind(user_id).first<any>()
   if (!user || (user.status && user.status !== 'active')) return null
@@ -417,21 +430,37 @@ function connection_uses_direct_session(connection: any) {
 }
 
 async function login_platform_via_crawler(c: any, platform: string, store_id: number, credentials: { email: string; password: string }) {
-  const response = await fetch(`${get_crawler_base(c)}/login`, {
-    method: 'POST',
-    headers: get_crawler_headers(c, true),
-    body: JSON.stringify({
-      platform,
-      store_id,
-      email: credentials.email,
-      password: credentials.password
+  try {
+    const response = await fetch(`${get_crawler_base(c)}/login`, {
+      method: 'POST',
+      headers: get_crawler_headers(c, true),
+      body: JSON.stringify({
+        platform,
+        store_id,
+        email: credentials.email,
+        password: credentials.password
+      })
     })
-  })
 
-  const result = await response.json() as any
-  return {
-    success: response.ok && !!result.success,
-    message: result.message || result.error || '플랫폼 로그인에 실패했습니다.'
+    const { data: result, text } = await read_json_or_text(response)
+    if (!result) {
+      return {
+        success: false,
+        message: text
+          ? `크롤러 응답을 해석하지 못했습니다: ${text.slice(0, 180)}`
+          : '크롤러 서버가 빈 응답을 반환했습니다. CRAWLER_API_BASE와 크롤러 상태를 확인해주세요.'
+      }
+    }
+
+    return {
+      success: response.ok && !!result.success,
+      message: result.message || result.error || '플랫폼 로그인에 실패했습니다.'
+    }
+  } catch (error: any) {
+    return {
+      success: false,
+      message: `크롤러 서버 연결에 실패했습니다: ${error.message}`
+    }
   }
 }
 
