@@ -2408,6 +2408,7 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthSessionId = '';
     let remoteAuthSnapshot = null;
     let remoteAuthPollTimer = null;
+    let remoteAuthScreenshotObjectUrl = null;
 
     function extractRemoteAuthSnapshot(payload) {
       if (!payload || typeof payload !== 'object') {
@@ -2502,7 +2503,28 @@ function platformRemoteAuthPage(platform: string) {
     async function refreshRemoteAuthScreenshot() {
       if (!remoteAuthSessionId) return;
       const image = document.getElementById('remote-auth-screenshot');
-      image.src = '/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/screenshot?ts=' + Date.now();
+      const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/screenshot?ts=' + Date.now());
+
+      if (!response.ok) {
+        let errorMessage = '원격 인증 화면 이미지를 불러오지 못했습니다.';
+        try {
+          const data = await response.json();
+          errorMessage = data?.error?.message || errorMessage;
+        } catch (error) {
+          const text = await response.text().catch(() => '');
+          if (text) {
+            errorMessage = text;
+          }
+        }
+        throw new Error(errorMessage);
+      }
+
+      const blob = await response.blob();
+      if (remoteAuthScreenshotObjectUrl) {
+        URL.revokeObjectURL(remoteAuthScreenshotObjectUrl);
+      }
+      remoteAuthScreenshotObjectUrl = URL.createObjectURL(blob);
+      image.src = remoteAuthScreenshotObjectUrl;
     }
 
     async function sendRemoteAuthAction(payload) {
