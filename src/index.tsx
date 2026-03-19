@@ -2305,20 +2305,23 @@ function platformRemoteAuthPage(platform: string) {
 
   return `${baseHead(meta.label + ' 인증', `
   <style>
-    .remote-auth-shell { --remote-auth-zoom: 1.55; }
+    .remote-auth-shell { --remote-auth-zoom: 2.05; }
     .remote-auth-canvas {
+      position: relative;
       overflow: auto;
-      max-height: calc(100vh - 290px);
-      min-height: 820px;
+      max-height: calc(100vh - 240px);
+      min-height: 920px;
       background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
       border-radius: 1.5rem;
       border: 1px solid #E2E8F0;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
     }
     .remote-auth-screenshot {
       width: calc(100% * var(--remote-auth-zoom));
       max-width: none;
       display: block;
       background: white;
+      image-rendering: auto;
     }
     .remote-auth-browser-bar {
       display: flex;
@@ -2394,9 +2397,10 @@ function platformRemoteAuthPage(platform: string) {
       background: #EA580C;
       border-color: #EA580C;
     }
-    .remote-auth-toolbar-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.95fr);
+    .remote-auth-bottom-tools {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
       gap: 1rem;
       margin-top: 1rem;
     }
@@ -2407,36 +2411,55 @@ function platformRemoteAuthPage(platform: string) {
       padding: 1rem;
       box-shadow: 0 8px 26px rgba(15, 23, 42, 0.05);
     }
-    .remote-auth-text-row {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) 164px;
-      gap: 0.85rem;
-      margin-bottom: 0.85rem;
-    }
-    .remote-auth-key-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+    .remote-auth-toolset {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
       gap: 0.75rem;
     }
-    .remote-auth-nav-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 0.75rem;
+    .remote-auth-toolset .remote-auth-toolbar-btn {
+      min-width: 118px;
+      padding: 0 1rem;
+    }
+    .remote-auth-focus-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-height: 44px;
+      padding: 0 0.95rem;
+      border-radius: 9999px;
+      border: 1px solid #E2E8F0;
+      background: #F8FAFC;
+      color: #475569;
+      font-size: 0.85rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .remote-auth-focus-pill.ready {
+      background: #ECFDF5;
+      border-color: #86EFAC;
+      color: #15803D;
+    }
+    .remote-auth-hidden-input {
+      position: fixed;
+      left: -9999px;
+      top: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
     }
     .remote-auth-side-panel {
       position: sticky;
       top: 1.5rem;
     }
     @media (max-width: 1279px) {
-      .remote-auth-toolbar-grid {
-        grid-template-columns: 1fr;
-      }
       .remote-auth-side-panel {
         position: static;
       }
     }
     @media (max-width: 768px) {
-      .remote-auth-shell { --remote-auth-zoom: 1.25; }
+      .remote-auth-shell { --remote-auth-zoom: 1.55; }
       .remote-auth-browser-bar {
         flex-wrap: wrap;
       }
@@ -2448,15 +2471,15 @@ function platformRemoteAuthPage(platform: string) {
         flex: 1;
       }
       .remote-auth-canvas {
-        min-height: 540px;
-        max-height: calc(100vh - 240px);
+        min-height: 720px;
+        max-height: calc(100vh - 220px);
       }
-      .remote-auth-text-row {
-        grid-template-columns: 1fr;
+      .remote-auth-toolset {
+        width: 100%;
       }
-      .remote-auth-key-grid,
-      .remote-auth-nav-grid {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
+      .remote-auth-toolset .remote-auth-toolbar-btn {
+        flex: 1 1 calc(50% - 0.75rem);
+        min-width: 0;
       }
     }
   </style>
@@ -2534,31 +2557,27 @@ function platformRemoteAuthPage(platform: string) {
             <span id="remote-auth-session-id" class="break-all"></span>
           </div>
 
-          <div class="remote-auth-toolbar-grid">
-            <section class="remote-auth-inline-card">
-              <div class="text-sm font-semibold text-gray-900 mb-3">입력 도구</div>
-              <div class="remote-auth-text-row">
-                <input id="remote-auth-text" type="text" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none" placeholder="클릭한 입력칸에 바로 입력할 텍스트">
-                <button onclick="typeRemoteAuthText()" class="remote-auth-toolbar-btn primary">입력 보내기</button>
-              </div>
-              <div class="remote-auth-key-grid">
-                <button onclick="sendRemoteAuthKey('Backspace')" class="remote-auth-toolbar-btn">Backspace</button>
-                <button onclick="sendRemoteAuthKey('Tab')" class="remote-auth-toolbar-btn">Tab</button>
-                <button onclick="sendRemoteAuthKey('Enter')" class="remote-auth-toolbar-btn">Enter</button>
+          <input id="remote-auth-capture-input" type="text" class="remote-auth-hidden-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" />
+          <div class="remote-auth-bottom-tools">
+            <section class="remote-auth-inline-card flex-1 min-w-[320px]">
+              <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <div class="text-sm font-semibold text-gray-900">직접 입력 모드</div>
+                  <div class="text-xs text-gray-500 mt-1 leading-5">화면 안 입력칸을 클릭하면 바로 타이핑, 한글 입력, 붙여넣기가 됩니다. 마우스 휠로 스크롤도 바로 할 수 있어요.</div>
+                </div>
+                <div id="remote-auth-focus-pill" class="remote-auth-focus-pill">입력 대상 선택 전</div>
               </div>
             </section>
-
-            <section class="remote-auth-inline-card">
-              <div class="text-sm font-semibold text-gray-900 mb-3">탐색 도구</div>
-              <div class="remote-auth-nav-grid">
-                <button onclick="sendRemoteAuthAction({ action: 'reload' })" class="remote-auth-toolbar-btn">페이지 새로고침</button>
-                <button onclick="sendRemoteAuthAction({ action: 'back' })" class="remote-auth-toolbar-btn">뒤로가기</button>
-                <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 })" class="remote-auth-toolbar-btn">위로 스크롤</button>
-                <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 })" class="remote-auth-toolbar-btn">아래로 스크롤</button>
-                <button onclick="waitRemoteAuth(1500)" class="remote-auth-toolbar-btn">1.5초 대기</button>
-                <button onclick="waitRemoteAuth(3000)" class="remote-auth-toolbar-btn">3초 대기</button>
-              </div>
-            </section>
+            <div class="remote-auth-toolset">
+              <button onclick="sendRemoteAuthKey('Backspace')" class="remote-auth-toolbar-btn">Backspace</button>
+              <button onclick="sendRemoteAuthKey('Tab')" class="remote-auth-toolbar-btn">Tab</button>
+              <button onclick="sendRemoteAuthKey('Enter')" class="remote-auth-toolbar-btn">Enter</button>
+              <button onclick="sendRemoteAuthAction({ action: 'reload' }, { refresh: 'deferred', delay: 320 })" class="remote-auth-toolbar-btn">새로고침</button>
+              <button onclick="sendRemoteAuthAction({ action: 'back' }, { refresh: 'deferred', delay: 320 })" class="remote-auth-toolbar-btn">뒤로가기</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 }, { refresh: 'deferred', delay: 220 })" class="remote-auth-toolbar-btn">위로 스크롤</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 }, { refresh: 'deferred', delay: 220 })" class="remote-auth-toolbar-btn">아래로 스크롤</button>
+              <button onclick="waitRemoteAuth(1800)" class="remote-auth-toolbar-btn">잠시 대기</button>
+            </div>
           </div>
         </section>
 
@@ -2585,7 +2604,11 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthSnapshot = null;
     let remoteAuthPollTimer = null;
     let remoteAuthScreenshotObjectUrl = null;
-    let remoteAuthZoom = window.innerWidth < 768 ? 1.25 : 1.55;
+    let remoteAuthRefreshTimer = null;
+    let remoteAuthActionChain = Promise.resolve();
+    let remoteAuthComposing = false;
+    let remoteAuthSkipNextInput = false;
+    let remoteAuthZoom = window.innerWidth < 768 ? 1.55 : 2.05;
 
     function extractRemoteAuthSnapshot(payload) {
       if (!payload || typeof payload !== 'object') {
@@ -2642,8 +2665,35 @@ function platformRemoteAuthPage(platform: string) {
     }
 
     function resetRemoteAuthZoom() {
-      remoteAuthZoom = window.innerWidth < 768 ? 1.25 : 1.55;
+      remoteAuthZoom = window.innerWidth < 768 ? 1.55 : 2.05;
       updateRemoteAuthZoomUi();
+    }
+
+    function updateRemoteAuthFocusPill(message, tone) {
+      const el = document.getElementById('remote-auth-focus-pill');
+      if (!el) return;
+      el.textContent = message;
+      el.classList.toggle('ready', tone === 'ready');
+    }
+
+    function scheduleRemoteAuthRefresh(delay = 260) {
+      if (remoteAuthRefreshTimer) {
+        clearTimeout(remoteAuthRefreshTimer);
+      }
+      remoteAuthRefreshTimer = setTimeout(function() {
+        refreshRemoteAuthStatus().catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      }, delay);
+    }
+
+    function queueRemoteAuthAction(task) {
+      remoteAuthActionChain = remoteAuthActionChain
+        .then(task)
+        .catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      return remoteAuthActionChain;
     }
 
     function updateRemoteAuthStatus(snapshot) {
@@ -2728,28 +2778,39 @@ function platformRemoteAuthPage(platform: string) {
       image.src = remoteAuthScreenshotObjectUrl;
     }
 
-    async function sendRemoteAuthAction(payload) {
+    async function sendRemoteAuthAction(payload, options = {}) {
       if (!remoteAuthSessionId) return;
-      const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/action', {
-        method: 'POST',
-        body: JSON.stringify(payload)
+      return queueRemoteAuthAction(async function() {
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/action', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          throw new Error(data?.error?.message || '원격 인증 조작에 실패했습니다.');
+        }
+        updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
+        if (options.refresh === 'deferred') {
+          scheduleRemoteAuthRefresh(options.delay || 260);
+        } else {
+          await refreshRemoteAuthScreenshot();
+        }
       });
-      const data = await readJsonResponse(response);
-      if (!response.ok || data.error) {
-        throw new Error(data?.error?.message || '원격 인증 조작에 실패했습니다.');
-      }
-      updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
-      await refreshRemoteAuthScreenshot();
     }
 
-    async function typeRemoteAuthText() {
-      const value = document.getElementById('remote-auth-text').value;
+    async function typeRemoteAuthText(textOverride) {
+      const input = document.getElementById('remote-auth-capture-input');
+      const value = typeof textOverride === 'string' ? textOverride : input.value;
       if (!value) {
-        showRemoteAuthAlert('먼저 입력할 텍스트를 적어주세요.', 'info');
+        updateRemoteAuthFocusPill('입력할 글자를 기다리는 중', '');
         return;
       }
+      if (input) {
+        input.value = '';
+      }
       try {
-        await sendRemoteAuthAction({ action: 'type', text: value });
+        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 260 });
+        updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2757,7 +2818,7 @@ function platformRemoteAuthPage(platform: string) {
 
     async function sendRemoteAuthKey(key) {
       try {
-        await sendRemoteAuthAction({ action: 'press', key: key });
+        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 220 });
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2765,7 +2826,7 @@ function platformRemoteAuthPage(platform: string) {
 
     async function waitRemoteAuth(ms) {
       try {
-        await sendRemoteAuthAction({ action: 'wait', ms: ms });
+        await sendRemoteAuthAction({ action: 'wait', ms: ms }, { refresh: 'deferred', delay: 120 });
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2819,6 +2880,10 @@ function platformRemoteAuthPage(platform: string) {
         clearInterval(remoteAuthPollTimer);
         remoteAuthPollTimer = null;
       }
+      if (remoteAuthRefreshTimer) {
+        clearTimeout(remoteAuthRefreshTimer);
+        remoteAuthRefreshTimer = null;
+      }
     }
 
     function startRemoteAuthPolling() {
@@ -2852,7 +2917,10 @@ function platformRemoteAuthPage(platform: string) {
       }
     }
 
-    document.getElementById('remote-auth-screenshot').addEventListener('click', async function(event) {
+    const remoteAuthScreenshotEl = document.getElementById('remote-auth-screenshot');
+    const remoteAuthCaptureInputEl = document.getElementById('remote-auth-capture-input');
+
+    remoteAuthScreenshotEl.addEventListener('click', async function(event) {
       if (!remoteAuthSnapshot?.viewport) {
         showRemoteAuthAlert('원격 브라우저 해상도가 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.', 'info');
         return;
@@ -2863,15 +2931,88 @@ function platformRemoteAuthPage(platform: string) {
       const x = Math.max(1, Math.round(relativeX * remoteAuthSnapshot.viewport.width));
       const y = Math.max(1, Math.round(relativeY * remoteAuthSnapshot.viewport.height));
       try {
-        await sendRemoteAuthAction({ action: 'click', x: x, y: y });
+        await sendRemoteAuthAction({ action: 'click', x: x, y: y }, { refresh: 'deferred', delay: 220 });
+        updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
+        if (remoteAuthCaptureInputEl) {
+          remoteAuthCaptureInputEl.focus();
+        }
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
+      }
+    });
+
+    remoteAuthScreenshotEl.addEventListener('wheel', function(event) {
+      event.preventDefault();
+      const deltaY = event.deltaY > 0 ? 480 : -480;
+      sendRemoteAuthAction({ action: 'scroll', deltaY: deltaY }, { refresh: 'deferred', delay: 200 });
+    }, { passive: false });
+
+    remoteAuthCaptureInputEl.addEventListener('compositionstart', function() {
+      remoteAuthComposing = true;
+      updateRemoteAuthFocusPill('한글 조합 중', 'ready');
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('compositionend', function() {
+      remoteAuthComposing = false;
+      const value = remoteAuthCaptureInputEl.value;
+      if (value) {
+        typeRemoteAuthText(value);
+      }
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('input', function() {
+      if (remoteAuthSkipNextInput) {
+        remoteAuthSkipNextInput = false;
+        return;
+      }
+      if (remoteAuthComposing) {
+        return;
+      }
+      const value = remoteAuthCaptureInputEl.value;
+      if (!value) {
+        return;
+      }
+      typeRemoteAuthText(value);
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('paste', function(event) {
+      const pastedText = event.clipboardData?.getData('text') || '';
+      if (!pastedText) {
+        return;
+      }
+      event.preventDefault();
+      remoteAuthSkipNextInput = true;
+      remoteAuthCaptureInputEl.value = '';
+      typeRemoteAuthText(pastedText);
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('keydown', function(event) {
+      if (event.key === 'Backspace' && !remoteAuthCaptureInputEl.value) {
+        event.preventDefault();
+        sendRemoteAuthKey('Backspace');
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        sendRemoteAuthKey('Enter');
+        return;
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        sendRemoteAuthKey('Tab');
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        updateRemoteAuthFocusPill('입력 대상 선택 전', '');
+        remoteAuthCaptureInputEl.blur();
       }
     });
 
     window.addEventListener('beforeunload', stopRemoteAuthPolling);
 
     updateRemoteAuthStatus(null);
+    updateRemoteAuthFocusPill('입력 대상 선택 전', '');
     updateRemoteAuthZoomUi();
     startRemoteAuth();
   </script>
