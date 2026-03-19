@@ -44,6 +44,7 @@ app.use((req, res, next) => {
 //  STATE MANAGEMENT
 // ============================================================
 const platformSessions = new Map(); // `${platform}:${storeId}` -> { browser, context, page, loggedIn }
+const remoteAuthSessions = new Map(); // sessionId -> { sessionId, platform, storeId, sessionKey, createdAt, updatedAt, status, lastError }
 const crawlJobs = [];
 const jobHistory = [];
 
@@ -54,6 +55,14 @@ function normalizeStoreId(storeId) {
 
 function getSessionKey(platform, storeId) {
   return `${platform}:${normalizeStoreId(storeId)}`;
+}
+
+function createRemoteAuthSessionId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `remote_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 // ============================================================
@@ -428,6 +437,7 @@ function isLoginSuccessUrl(platform, currentUrl) {
     return (
       normalized.includes('self.baemin.com') &&
       !normalized.includes('/login') &&
+      !normalized.includes('/bridge') &&
       !normalized.includes('nid.naver.com/nidlogin')
     );
   }
@@ -464,6 +474,78 @@ async function openLoginSurface(platform, page, config) {
     if (await hasVisibleLoginSurface(page, config)) {
       return;
     }
+  }
+}
+
+async function getRemoteAuthSnapshot(remoteSession) {
+  const session = platformSessions.get(remoteSession.sessionKey);
+  if (!isSessionActive(session)) {
+    return {
+      success: false,
+      status: 'closed',
+      message: '원격 인증 세션이 종료되었습니다.',
+      current_url: '',
+      title: '',
+      can_complete: false,
+      viewport: { width: 0, height: 0 }
+    };
+  }
+
+  const currentUrl = session.page.url();
+  const title = await session.page.title().catch(() => '');
+  const bodyText = await session.page.locator('body').innerText().catch(() => '');
+  const normalizedBody = String(bodyText || '').toLowerCase();
+  const canComplete = isLoginSuccessUrl(remoteSession.platform, currentUrl);
+
+  let stage = canComplete ? 'ready' : 'auth_in_progress';
+  let message = '로그인 화면을 진행 중입니다.';
+
+  if (remoteSession.platform === 'baemin') {
+    if (currentUrl.includes('nid.naver.com/nidlogin')) {
+      stage = 'auth_in_progress';
+      message = '네이버 로그인 화면입니다. 아이디/비밀번호 입력 후 추가 인증이 나오면 그대로 진행해주세요.';
+    } else if (normalizedBody.includes('셀프서비스 시작하기')) {
+      stage = 'needs_user_action';
+      message = '배민 셀프서비스 시작 화면입니다. "셀프서비스 시작하기"를 눌러 실제 운영 화면으로 이동해주세요.';
+    } else if (canComplete) {
+      stage = 'ready';
+      message = '배민 운영 화면에 진입했습니다. 인증 완료 처리 후 웹앱으로 돌아갈 수 있습니다.';
+    }
+  }
+
+  if (remoteSession.platform === 'coupang_eats' && normalizedBody.includes('access denied')) {
+    stage = 'blocked';
+    message = '쿠팡이츠가 현재 서버 환경을 차단하고 있습니다. 다른 실행 환경이 필요할 수 있습니다.';
+  }
+
+  if (remoteSession.platform === 'yogiyo' && canComplete) {
+    stage = 'ready';
+    message = '요기요 운영 화면에 진입했습니다. 인증 완료 처리 후 웹앱으로 돌아갈 수 있습니다.';
+  }
+
+  remoteSession.updatedAt = Date.now();
+  remoteSession.status = stage;
+
+  return {
+    success: true,
+    status: stage,
+    message,
+    current_url: currentUrl,
+    title,
+    can_complete: canComplete,
+    viewport: session.page.viewportSize() || { width: 1280, height: 720 }
+  };
+}
+
+async function cleanupRemoteAuthSession(sessionId, options = {}) {
+  const { closeBrowser = false } = options;
+  const remoteSession = remoteAuthSessions.get(sessionId);
+  if (!remoteSession) return;
+
+  remoteAuthSessions.delete(sessionId);
+
+  if (closeBrowser) {
+    await closePlatformSession(remoteSession.platform, remoteSession.storeId);
   }
 }
 
@@ -1502,6 +1584,183 @@ app.post('/login', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+app.post('/remote-auth/start', async (req, res) => {
+  const { platform, store_id } = req.body || {};
+
+  if (!platform || !PLATFORMS[platform]) {
+    return res.status(400).json({ error: 'Invalid platform', supported: Object.keys(PLATFORMS) });
+  }
+
+  try {
+    const normalizedStoreId = normalizeStoreId(store_id);
+    const session = await getContext(platform, normalizedStoreId, { fresh: true });
+    await openLoginSurface(platform, session.page, PLATFORMS[platform]);
+    session.loggedIn = false;
+    session.lastActivity = Date.now();
+
+    const sessionId = createRemoteAuthSessionId();
+    const remoteSession = {
+      sessionId,
+      platform,
+      storeId: normalizedStoreId,
+      sessionKey: session.sessionKey,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: 'auth_in_progress',
+      lastError: null
+    };
+    remoteAuthSessions.set(sessionId, remoteSession);
+
+    const snapshot = await getRemoteAuthSnapshot(remoteSession);
+    res.json({
+      success: true,
+      session_id: sessionId,
+      platform,
+      ...snapshot
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/remote-auth/:sessionId/status', async (req, res) => {
+  const remoteSession = remoteAuthSessions.get(req.params.sessionId);
+  if (!remoteSession) {
+    return res.status(404).json({ success: false, error: '원격 인증 세션을 찾을 수 없습니다.' });
+  }
+
+  try {
+    const snapshot = await getRemoteAuthSnapshot(remoteSession);
+    res.status(snapshot.success ? 200 : 410).json({
+      success: snapshot.success,
+      session_id: remoteSession.sessionId,
+      platform: remoteSession.platform,
+      ...snapshot
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/remote-auth/:sessionId/screenshot', async (req, res) => {
+  const remoteSession = remoteAuthSessions.get(req.params.sessionId);
+  if (!remoteSession) {
+    return res.status(404).json({ error: '원격 인증 세션을 찾을 수 없습니다.' });
+  }
+
+  const session = platformSessions.get(remoteSession.sessionKey);
+  if (!isSessionActive(session)) {
+    return res.status(410).json({ error: '원격 인증 세션이 종료되었습니다.' });
+  }
+
+  try {
+    const image = await session.page.screenshot({ type: 'png' });
+    session.lastActivity = Date.now();
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.end(image);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/remote-auth/:sessionId/action', async (req, res) => {
+  const remoteSession = remoteAuthSessions.get(req.params.sessionId);
+  if (!remoteSession) {
+    return res.status(404).json({ success: false, error: '원격 인증 세션을 찾을 수 없습니다.' });
+  }
+
+  const session = platformSessions.get(remoteSession.sessionKey);
+  if (!isSessionActive(session)) {
+    await cleanupRemoteAuthSession(req.params.sessionId);
+    return res.status(410).json({ success: false, error: '원격 인증 세션이 종료되었습니다.' });
+  }
+
+  const { action, x, y, text, key, deltaY, url } = req.body || {};
+
+  try {
+    if (action === 'click') {
+      await session.page.mouse.click(Number(x || 0), Number(y || 0));
+    } else if (action === 'type') {
+      await session.page.keyboard.type(String(text || ''), { delay: 20 });
+    } else if (action === 'press') {
+      await session.page.keyboard.press(String(key || 'Enter'));
+    } else if (action === 'scroll') {
+      await session.page.mouse.wheel(0, Number(deltaY || 600));
+    } else if (action === 'reload') {
+      await session.page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    } else if (action === 'back') {
+      await session.page.goBack({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    } else if (action === 'goto' && url) {
+      await session.page.goto(String(url), { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } else if (action === 'wait') {
+      await session.page.waitForTimeout(Math.max(200, Math.min(Number(deltaY || 800), 5000)));
+    } else {
+      return res.status(400).json({ success: false, error: '지원하지 않는 원격 인증 액션입니다.' });
+    }
+
+    await session.page.waitForTimeout(400);
+    session.lastActivity = Date.now();
+
+    const snapshot = await getRemoteAuthSnapshot(remoteSession);
+    res.json({
+      success: true,
+      session_id: remoteSession.sessionId,
+      platform: remoteSession.platform,
+      ...snapshot
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/remote-auth/:sessionId/complete', async (req, res) => {
+  const remoteSession = remoteAuthSessions.get(req.params.sessionId);
+  if (!remoteSession) {
+    return res.status(404).json({ success: false, error: '원격 인증 세션을 찾을 수 없습니다.' });
+  }
+
+  const session = platformSessions.get(remoteSession.sessionKey);
+  if (!isSessionActive(session)) {
+    await cleanupRemoteAuthSession(req.params.sessionId);
+    return res.status(410).json({ success: false, error: '원격 인증 세션이 종료되었습니다.' });
+  }
+
+  try {
+    const snapshot = await getRemoteAuthSnapshot(remoteSession);
+    if (!snapshot.can_complete) {
+      return res.status(400).json({
+        success: false,
+        error: snapshot.message || '아직 인증 완료 상태로 확인되지 않았습니다. 운영 화면까지 진행한 뒤 다시 시도해주세요.'
+      });
+    }
+
+    session.loggedIn = true;
+    session.lastActivity = Date.now();
+    remoteSession.status = 'connected';
+    remoteSession.updatedAt = Date.now();
+
+    res.json({
+      success: true,
+      platform: remoteSession.platform,
+      store_id: remoteSession.storeId,
+      message: '원격 인증 세션이 연결되었습니다.'
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/remote-auth/:sessionId/cancel', async (req, res) => {
+  const remoteSession = remoteAuthSessions.get(req.params.sessionId);
+  if (!remoteSession) {
+    return res.status(404).json({ success: false, error: '원격 인증 세션을 찾을 수 없습니다.' });
+  }
+
+  await cleanupRemoteAuthSession(req.params.sessionId, { closeBrowser: true });
+  res.json({ success: true, message: '원격 인증 세션을 종료했습니다.' });
 });
 
 // 리뷰 수집
