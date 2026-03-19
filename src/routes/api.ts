@@ -486,6 +486,96 @@ async function get_live_session_state_from_crawler(c: any, platform: string, sto
   }
 }
 
+async function start_remote_platform_auth(c: any, platform: string, store_id: number) {
+  const response = await fetch(`${get_crawler_base(c)}/remote-auth/start`, {
+    method: 'POST',
+    headers: get_crawler_headers(c, true),
+    body: JSON.stringify({
+      platform,
+      store_id
+    })
+  })
+
+  const { data, text } = await read_json_or_text(response)
+  if (!data) {
+    throw new Error(text || '크롤러가 원격 인증 세션을 시작하지 못했습니다.')
+  }
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || data.message || '원격 인증 세션 시작에 실패했습니다.')
+  }
+
+  return data
+}
+
+async function read_remote_platform_auth_status(c: any, session_id: string) {
+  const response = await fetch(`${get_crawler_base(c)}/remote-auth/${session_id}/status`, {
+    headers: get_crawler_headers(c)
+  })
+  const { data, text } = await read_json_or_text(response)
+  if (!data) {
+    throw new Error(text || '크롤러가 원격 인증 상태를 반환하지 않았습니다.')
+  }
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || data.message || '원격 인증 상태 조회에 실패했습니다.')
+  }
+
+  return data
+}
+
+async function send_remote_platform_auth_action(c: any, session_id: string, payload: Record<string, unknown>) {
+  const response = await fetch(`${get_crawler_base(c)}/remote-auth/${session_id}/action`, {
+    method: 'POST',
+    headers: get_crawler_headers(c, true),
+    body: JSON.stringify(payload)
+  })
+  const { data, text } = await read_json_or_text(response)
+  if (!data) {
+    throw new Error(text || '크롤러가 원격 인증 액션 결과를 반환하지 않았습니다.')
+  }
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || data.message || '원격 인증 액션 수행에 실패했습니다.')
+  }
+
+  return data
+}
+
+async function complete_remote_platform_auth(c: any, session_id: string) {
+  const response = await fetch(`${get_crawler_base(c)}/remote-auth/${session_id}/complete`, {
+    method: 'POST',
+    headers: get_crawler_headers(c)
+  })
+  const { data, text } = await read_json_or_text(response)
+  if (!data) {
+    throw new Error(text || '크롤러가 원격 인증 완료 결과를 반환하지 않았습니다.')
+  }
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || data.message || '원격 인증 완료 처리에 실패했습니다.')
+  }
+
+  return data
+}
+
+async function cancel_remote_platform_auth(c: any, session_id: string) {
+  const response = await fetch(`${get_crawler_base(c)}/remote-auth/${session_id}/cancel`, {
+    method: 'POST',
+    headers: get_crawler_headers(c)
+  })
+  const { data, text } = await read_json_or_text(response)
+  if (!data) {
+    throw new Error(text || '크롤러가 원격 인증 종료 결과를 반환하지 않았습니다.')
+  }
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || data.message || '원격 인증 종료에 실패했습니다.')
+  }
+
+  return data
+}
+
 async function ensure_live_platform_session(c: any, store_id: number, platform: string) {
   const connection = await load_platform_connection(c.env.DB, store_id, platform)
   if (!connection) {
@@ -1984,6 +2074,188 @@ apiRoutes.post('/platform_connections/:platform/auth-mode', async (c) => {
       ? '직접 로그인 세션 모드로 전환되었습니다.'
       : '자동 로그인 모드로 전환되었습니다.'
   })
+})
+
+apiRoutes.post('/platform_connections/:platform/remote-auth/start', async (c) => {
+  const auth_user = c.get('auth_user')
+  const store_id = resolve_store_id(auth_user, null)
+  if (!store_id) {
+    return json_error(c, 400, 'store_not_found', '매장을 찾을 수 없습니다.')
+  }
+
+  const platform = c.req.param('platform')
+  if (!supported_platforms.has(platform)) {
+    return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
+  }
+
+  const { platform_store_id } = await read_json_body<{ platform_store_id?: string | null }>(c)
+
+  try {
+    const result = await start_remote_platform_auth(c, platform, store_id)
+    const connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
+      connection_status: 'disconnected',
+      platform_store_id: platform_store_id?.trim() || undefined,
+      auth_mode: 'direct_session',
+      session_status: 'pending',
+      session_connected_at: null,
+      session_last_validated_at: new Date().toISOString(),
+      last_error: result.message || '원격 인증 세션이 준비되었습니다. 로그인과 추가 인증을 진행해주세요.'
+    })
+
+    return c.json({
+      success: true,
+      session_id: result.session_id,
+      platform,
+      connection: sanitize_platform_connection(connection),
+      remote_auth: result
+    })
+  } catch (error: any) {
+    return json_error(c, 400, 'remote_auth_start_failed', error.message)
+  }
+})
+
+apiRoutes.get('/platform_connections/:platform/remote-auth/:session_id/status', async (c) => {
+  const auth_user = c.get('auth_user')
+  const store_id = resolve_store_id(auth_user, null)
+  if (!store_id) {
+    return json_error(c, 400, 'store_not_found', '매장을 찾을 수 없습니다.')
+  }
+
+  const platform = c.req.param('platform')
+  if (!supported_platforms.has(platform)) {
+    return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
+  }
+
+  try {
+    const result = await read_remote_platform_auth_status(c, c.req.param('session_id'))
+    return c.json({ success: true, platform, remote_auth: result })
+  } catch (error: any) {
+    return json_error(c, 400, 'remote_auth_status_failed', error.message)
+  }
+})
+
+apiRoutes.get('/platform_connections/:platform/remote-auth/:session_id/screenshot', async (c) => {
+  const auth_user = c.get('auth_user')
+  const store_id = resolve_store_id(auth_user, null)
+  if (!store_id) {
+    return json_error(c, 400, 'store_not_found', '매장을 찾을 수 없습니다.')
+  }
+
+  const platform = c.req.param('platform')
+  if (!supported_platforms.has(platform)) {
+    return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
+  }
+
+  try {
+    const response = await fetch(`${get_crawler_base(c)}/remote-auth/${c.req.param('session_id')}/screenshot`, {
+      headers: get_crawler_headers(c)
+    })
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      return json_error(c, 400, 'remote_auth_screenshot_failed', text || '원격 인증 스크린샷을 가져오지 못했습니다.')
+    }
+
+    const image = await response.arrayBuffer()
+    return new Response(image, {
+      headers: {
+        'Content-Type': response.headers.get('content-type') || 'image/png',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate'
+      }
+    })
+  } catch (error: any) {
+    return json_error(c, 400, 'remote_auth_screenshot_failed', error.message)
+  }
+})
+
+apiRoutes.post('/platform_connections/:platform/remote-auth/:session_id/action', async (c) => {
+  const auth_user = c.get('auth_user')
+  const store_id = resolve_store_id(auth_user, null)
+  if (!store_id) {
+    return json_error(c, 400, 'store_not_found', '매장을 찾을 수 없습니다.')
+  }
+
+  const platform = c.req.param('platform')
+  if (!supported_platforms.has(platform)) {
+    return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
+  }
+
+  try {
+    const payload = await read_json_body<Record<string, unknown>>(c)
+    const result = await send_remote_platform_auth_action(c, c.req.param('session_id'), payload)
+    return c.json({ success: true, platform, remote_auth: result })
+  } catch (error: any) {
+    return json_error(c, 400, 'remote_auth_action_failed', error.message)
+  }
+})
+
+apiRoutes.post('/platform_connections/:platform/remote-auth/:session_id/complete', async (c) => {
+  const auth_user = c.get('auth_user')
+  const store_id = resolve_store_id(auth_user, null)
+  if (!store_id) {
+    return json_error(c, 400, 'store_not_found', '매장을 찾을 수 없습니다.')
+  }
+
+  const platform = c.req.param('platform')
+  if (!supported_platforms.has(platform)) {
+    return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
+  }
+
+  try {
+    const result = await complete_remote_platform_auth(c, c.req.param('session_id'))
+    const connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
+      connection_status: 'connected',
+      auth_mode: 'direct_session',
+      session_status: 'connected',
+      session_connected_at: new Date().toISOString(),
+      session_last_validated_at: new Date().toISOString(),
+      last_error: null,
+      touch_sync_time: true
+    })
+
+    return c.json({
+      success: true,
+      platform,
+      connection: sanitize_platform_connection(connection),
+      remote_auth: result
+    })
+  } catch (error: any) {
+    return json_error(c, 400, 'remote_auth_complete_failed', error.message)
+  }
+})
+
+apiRoutes.post('/platform_connections/:platform/remote-auth/:session_id/cancel', async (c) => {
+  const auth_user = c.get('auth_user')
+  const store_id = resolve_store_id(auth_user, null)
+  if (!store_id) {
+    return json_error(c, 400, 'store_not_found', '매장을 찾을 수 없습니다.')
+  }
+
+  const platform = c.req.param('platform')
+  if (!supported_platforms.has(platform)) {
+    return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
+  }
+
+  try {
+    const result = await cancel_remote_platform_auth(c, c.req.param('session_id'))
+    const connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
+      connection_status: 'disconnected',
+      auth_mode: 'direct_session',
+      session_status: 'inactive',
+      session_connected_at: null,
+      session_last_validated_at: new Date().toISOString(),
+      last_error: '원격 인증 세션이 종료되었습니다.'
+    })
+
+    return c.json({
+      success: true,
+      platform,
+      connection: sanitize_platform_connection(connection),
+      remote_auth: result
+    })
+  } catch (error: any) {
+    return json_error(c, 400, 'remote_auth_cancel_failed', error.message)
+  }
 })
 
 apiRoutes.get('/platform_connections/:platform/mobile-session-config', async (c) => {
