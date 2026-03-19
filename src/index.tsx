@@ -53,6 +53,7 @@ app.get('/dashboard', (c) => c.html(dashboardPage(getPageOptions(c.env))))
 app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env))))
 app.get('/billing', (c) => c.html(billingPage(getPageOptions(c.env))))
 app.get('/settings', (c) => c.html(settingsPage(getPageOptions(c.env))))
+app.get('/platform-auth/:platform', (c) => c.html(platformRemoteAuthPage(c.req.param('platform'))))
 app.get('/customers', (c) => c.html(customersPage(getPageOptions(c.env))))
 app.get('/mobile/session-center', (c) => c.html(mobileSessionCenterPage(c.req.query('app_shell') === '1')))
 app.get('/mobile/app-shell', (c) => c.html(mobileAppShellPage()))
@@ -2075,6 +2076,31 @@ function settingsPage(options: PageOptions) {
             ? '최초 1회 계정 연결 후에는 저장된 연결을 재사용합니다. 세션이 만료되면 세션 갱신 또는 비밀번호 재입력으로 복구할 수 있습니다.'
             : '최초 1회만 플랫폼 운영 계정을 연결하면 이후에는 저장된 연결과 세션을 재사용합니다.';
         const connectButtonLabel = connection.has_credentials ? '저장된 계정으로 다시 연결' : '최초 계정 연결';
+        if (platform === 'baemin') {
+          const baeminHelperText = connection.last_error
+            ? connection.last_error
+            : connection.session_status === 'connected'
+              ? '배민은 최초 1회 직접 인증 후 서버가 해당 운영 세션을 재사용합니다. 세션이 만료되면 다시 인증하면 됩니다.'
+              : '배민은 최초 1회 직접 인증으로 네이버 추가 인증/CAPTCHA를 직접 해결한 뒤, 연결된 운영 세션을 재사용합니다.';
+          return '<div class="border border-gray-200 rounded-2xl p-5">'
+            + '<div class="flex items-center justify-between mb-4"><div class="flex items-center gap-3">'
+            + '<div class="w-10 h-10 rounded-full text-white text-xs font-bold flex items-center justify-center" style="background:' + meta.color + '">' + meta.label.slice(0, 2) + '</div>'
+            + '<div><div class="font-semibold text-gray-900">' + meta.label + '</div><div class="text-xs text-gray-400">' + baeminHelperText + '</div></div></div>'
+            + '<div class="flex items-center gap-2">' + statusBadge + getSessionStatusLabel(connection) + '</div></div>'
+            + '<div class="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-500">'
+            + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">연결 방식: 최초 1회 직접 인증 + 서버 세션 재사용</span>'
+            + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">최근 세션 확인: ' + (connection.session_last_validated_at ? new Date(connection.session_last_validated_at).toLocaleString('ko-KR') : '-') + '</span>'
+            + '</div>'
+            + '<div class="grid md:grid-cols-[1fr_auto] gap-3 mb-4">'
+            + '<input id="' + platform + '-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
+            + '<button onclick="startRemotePlatformAuth(\\'' + platform + '\\')" class="bg-brand-500 text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition whitespace-nowrap">' + (connection.session_status === 'connected' ? '다시 인증 시작' : '배민 인증 시작') + '</button>'
+            + '</div>'
+            + '<div class="flex flex-wrap items-center gap-3">'
+            + '<button id="' + platform + '-refresh-btn" onclick="refreshPlatformSession(\\'' + platform + '\\')" class="border border-brand-200 text-brand-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-brand-50 transition">세션 갱신</button>'
+            + '<button id="' + platform + '-disconnect-btn" onclick="disconnectPlatform(\\'' + platform + '\\')" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">연결 해제</button>'
+            + '<span class="text-xs text-gray-400">마지막 동기화: ' + (connection.last_sync_at ? new Date(connection.last_sync_at).toLocaleString('ko-KR') : '-') + '</span>'
+            + '</div></div>';
+        }
         const bodyFields = '<div class="grid md:grid-cols-3 gap-3 mb-4">'
           + '<input id="' + platform + '-email" type="email" value="' + (connection.login_email || '') + '" placeholder="로그인 이메일" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
           + '<input id="' + platform + '-password" type="password" placeholder="' + (connection.has_credentials ? '비밀번호 변경 시에만 다시 입력' : '로그인 비밀번호') + '" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
@@ -2187,6 +2213,16 @@ function settingsPage(options: PageOptions) {
       }
     }
 
+    function startRemotePlatformAuth(platform) {
+      const platformStoreId = document.getElementById(platform + '-store-id')?.value?.trim() || '';
+      const target = new URL('/platform-auth/' + platform, window.location.origin);
+      if (platformStoreId) {
+        target.searchParams.set('platform_store_id', platformStoreId);
+      }
+      target.searchParams.set('return_to', '/settings');
+      window.location.href = target.toString();
+    }
+
     async function refreshPlatformSession(platform) {
       const connection = getConnectionByPlatform(platform);
       if (!connection?.has_credentials) {
@@ -2239,6 +2275,381 @@ function settingsPage(options: PageOptions) {
     Promise.all([loadStoreSettings(), loadConnections()]).catch(error => {
       showSettingsAlert(error.message, 'error');
     });
+  </script>
+</body>
+</html>`
+}
+
+function platformRemoteAuthPage(platform: string) {
+  const meta = {
+    baemin: {
+      label: '배달의민족',
+      color: '#00C4B4',
+      hint: '네이버 로그인과 추가 인증, CAPTCHA가 보이면 이 화면에서 직접 해결해주세요. 로그인 후 배민 운영 화면이 열리면 인증 완료를 누르면 됩니다.'
+    },
+    coupang_eats: {
+      label: '쿠팡이츠',
+      color: '#E4002B',
+      hint: '쿠팡이츠는 현재 실행 환경 차단 가능성이 높습니다. 페이지가 차단되면 다른 환경 대응이 필요합니다.'
+    },
+    yogiyo: {
+      label: '요기요',
+      color: '#FA0050',
+      hint: '요기요 로그인 후 운영 화면이나 리뷰 화면이 열리면 인증 완료를 누르면 됩니다.'
+    }
+  }[platform as 'baemin' | 'coupang_eats' | 'yogiyo'] || {
+    label: platform,
+    color: '#64748B',
+    hint: '로그인과 추가 인증을 진행한 뒤 인증 완료를 눌러주세요.'
+  };
+
+  return `${baseHead(meta.label + ' 인증')}
+<body class="bg-gray-50 min-h-screen">
+  ${userSidebar('settings', false)}
+  <main class="ml-[72px] min-h-screen p-6">
+    <div class="max-w-6xl mx-auto">
+      <div class="mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <a href="/settings" class="inline-flex items-center gap-2 text-sm text-brand-600 hover:text-brand-700 mb-3">
+            <i class="fas fa-arrow-left"></i>
+            설정으로 돌아가기
+          </a>
+          <div class="flex items-center gap-3 mb-3">
+            <div class="w-12 h-12 rounded-2xl text-white text-sm font-bold flex items-center justify-center" style="background:${meta.color}">${meta.label.slice(0, 2)}</div>
+            <div>
+              <h1 class="text-2xl font-bold text-gray-900">${meta.label} 원격 인증</h1>
+              <p class="text-sm text-gray-500 mt-1">웹앱 안에서 서버 브라우저 화면을 원격 조작해 최초 1회 인증을 완료합니다.</p>
+            </div>
+          </div>
+          <div class="rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-700 max-w-3xl">
+            ${meta.hint}
+          </div>
+        </div>
+        <div class="bg-white border border-gray-100 rounded-2xl p-4 w-full lg:w-[320px] shadow-sm">
+          <div class="text-xs uppercase tracking-[0.24em] text-gray-400 mb-2">인증 상태</div>
+          <div id="remote-auth-status-pill" class="inline-flex items-center gap-2 text-xs bg-gray-100 text-gray-700 px-3 py-2 rounded-full">준비중</div>
+          <div id="remote-auth-message" class="text-sm text-gray-600 mt-3 leading-6">원격 브라우저 세션을 준비하는 중입니다.</div>
+          <div class="mt-4 text-xs text-gray-500 space-y-2">
+            <div>현재 주소</div>
+            <div id="remote-auth-current-url" class="break-all text-gray-700"></div>
+            <div class="pt-2">페이지 제목</div>
+            <div id="remote-auth-title" class="break-all text-gray-700"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="remote-auth-alert" class="hidden rounded-2xl border px-5 py-4 text-sm mb-6"></div>
+
+      <div class="grid xl:grid-cols-[1.35fr_0.65fr] gap-6">
+        <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
+          <div class="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <div class="text-sm font-semibold text-gray-900">원격 브라우저 화면</div>
+              <div class="text-xs text-gray-400 mt-1">화면을 직접 클릭해 입력 칸에 포커스를 준 뒤, 오른쪽 도구로 입력/이동을 진행하세요.</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button onclick="manualRefreshRemoteAuth()" class="border border-gray-200 text-gray-600 px-3 py-2 rounded-xl text-sm hover:bg-gray-50 transition">새로고침</button>
+              <button onclick="cancelRemoteAuth()" class="border border-red-200 text-red-600 px-3 py-2 rounded-xl text-sm hover:bg-red-50 transition">인증 종료</button>
+            </div>
+          </div>
+          <div class="rounded-2xl border border-dashed border-gray-200 bg-gray-50 overflow-hidden">
+            <img id="remote-auth-screenshot" alt="${meta.label} 인증 화면" class="w-full cursor-crosshair select-none block" />
+          </div>
+          <div class="mt-3 text-xs text-gray-500 flex flex-wrap items-center gap-3">
+            <span id="remote-auth-resolution">해상도 확인 중...</span>
+            <span id="remote-auth-session-id" class="break-all"></span>
+          </div>
+        </section>
+
+        <aside class="space-y-6">
+          <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
+            <div class="text-sm font-semibold text-gray-900 mb-4">입력 도구</div>
+            <div class="space-y-3">
+              <input id="remote-auth-text" type="text" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none" placeholder="클릭한 입력칸에 보낼 텍스트">
+              <div class="grid grid-cols-2 gap-3">
+                <button onclick="typeRemoteAuthText()" class="bg-brand-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">텍스트 입력</button>
+                <button onclick="sendRemoteAuthKey('Backspace')" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">Backspace</button>
+                <button onclick="sendRemoteAuthKey('Tab')" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">Tab</button>
+                <button onclick="sendRemoteAuthKey('Enter')" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">Enter</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
+            <div class="text-sm font-semibold text-gray-900 mb-4">탐색 도구</div>
+            <div class="grid grid-cols-2 gap-3">
+              <button onclick="sendRemoteAuthAction({ action: 'reload' })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">페이지 새로고침</button>
+              <button onclick="sendRemoteAuthAction({ action: 'back' })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">뒤로가기</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">위로 스크롤</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">아래로 스크롤</button>
+              <button onclick="waitRemoteAuth(1500)" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">1.5초 대기</button>
+              <button onclick="waitRemoteAuth(3000)" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">3초 대기</button>
+            </div>
+          </section>
+
+          <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
+            <div class="text-sm font-semibold text-gray-900 mb-2">완료 처리</div>
+            <p class="text-xs text-gray-500 leading-6 mb-4">배민 운영 화면까지 진입했거나, 더 이상 네이버 인증/CAPTCHA 단계가 아닌 상태라면 아래 버튼으로 세션을 연결 완료 처리하세요.</p>
+            <div class="space-y-3">
+              <button id="remote-auth-complete-btn" onclick="completeRemoteAuth()" class="w-full bg-green-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-green-600 transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>인증 완료 후 설정으로 돌아가기</button>
+              <button onclick="window.location.href='/reviews'" class="w-full border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">리뷰 관리로 이동</button>
+            </div>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </main>
+  <script>
+    ensureAuthenticated();
+
+    const remotePlatform = ${JSON.stringify(platform)};
+    const remoteReturnTo = resolveSafeNextPath(new URLSearchParams(window.location.search).get('return_to')) || '/settings';
+    const initialPlatformStoreId = new URLSearchParams(window.location.search).get('platform_store_id') || '';
+    let remoteAuthSessionId = '';
+    let remoteAuthSnapshot = null;
+    let remoteAuthPollTimer = null;
+
+    function extractRemoteAuthSnapshot(payload) {
+      if (!payload || typeof payload !== 'object') {
+        return null;
+      }
+
+      if (payload.snapshot && typeof payload.snapshot === 'object') {
+        return payload.snapshot;
+      }
+
+      if (payload.remote_auth && typeof payload.remote_auth === 'object') {
+        if (payload.remote_auth.snapshot && typeof payload.remote_auth.snapshot === 'object') {
+          return payload.remote_auth.snapshot;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(payload.remote_auth, 'status')) {
+          return payload.remote_auth;
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(payload, 'status')) {
+        return payload;
+      }
+
+      return null;
+    }
+
+    function showRemoteAuthAlert(message, tone) {
+      const el = document.getElementById('remote-auth-alert');
+      const styles = tone === 'error'
+        ? 'border-red-200 bg-red-50 text-red-700'
+        : tone === 'success'
+          ? 'border-green-200 bg-green-50 text-green-700'
+          : 'border-blue-200 bg-blue-50 text-blue-700';
+      el.className = 'rounded-2xl border px-5 py-4 text-sm mb-6 ' + styles;
+      el.textContent = message;
+      el.classList.remove('hidden');
+    }
+
+    function updateRemoteAuthStatus(snapshot) {
+      remoteAuthSnapshot = snapshot || null;
+      const pill = document.getElementById('remote-auth-status-pill');
+      const messageEl = document.getElementById('remote-auth-message');
+      const urlEl = document.getElementById('remote-auth-current-url');
+      const titleEl = document.getElementById('remote-auth-title');
+      const completeButton = document.getElementById('remote-auth-complete-btn');
+      const resolutionEl = document.getElementById('remote-auth-resolution');
+      const sessionIdEl = document.getElementById('remote-auth-session-id');
+
+      if (!snapshot) {
+        pill.className = 'inline-flex items-center gap-2 text-xs bg-gray-100 text-gray-700 px-3 py-2 rounded-full';
+        pill.textContent = '상태 확인 중';
+        messageEl.textContent = '원격 인증 상태를 불러오는 중입니다.';
+        urlEl.textContent = '-';
+        titleEl.textContent = '-';
+        completeButton.disabled = true;
+        resolutionEl.textContent = '해상도 확인 중...';
+        sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
+        return;
+      }
+
+      const statusMap = {
+        auth_in_progress: ['bg-yellow-100 text-yellow-700', '인증 진행 중'],
+        needs_user_action: ['bg-orange-100 text-orange-700', '추가 동작 필요'],
+        ready: ['bg-green-100 text-green-700', '완료 가능'],
+        blocked: ['bg-red-100 text-red-700', '차단 감지'],
+        error: ['bg-red-100 text-red-700', '오류'],
+        pending: ['bg-gray-100 text-gray-700', '대기 중']
+      };
+      const statusInfo = statusMap[snapshot.status] || ['bg-gray-100 text-gray-700', snapshot.status || '상태 확인'];
+      pill.className = 'inline-flex items-center gap-2 text-xs px-3 py-2 rounded-full ' + statusInfo[0];
+      pill.textContent = statusInfo[1];
+      messageEl.textContent = snapshot.message || '상태 메시지가 없습니다.';
+      urlEl.textContent = snapshot.current_url || '-';
+      titleEl.textContent = snapshot.title || '-';
+      completeButton.disabled = !snapshot.can_complete;
+      resolutionEl.textContent = snapshot.viewport ? ('원격 브라우저 해상도: ' + snapshot.viewport.width + ' x ' + snapshot.viewport.height) : '원격 브라우저 해상도 확인 중';
+      sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
+    }
+
+    async function refreshRemoteAuthStatus() {
+      if (!remoteAuthSessionId) return;
+      const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/status');
+      const data = await readJsonResponse(response);
+      if (!response.ok || data.error) {
+        throw new Error(data?.error?.message || '원격 인증 상태를 불러오지 못했습니다.');
+      }
+      updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
+      await refreshRemoteAuthScreenshot();
+    }
+
+    async function refreshRemoteAuthScreenshot() {
+      if (!remoteAuthSessionId) return;
+      const image = document.getElementById('remote-auth-screenshot');
+      image.src = '/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/screenshot?ts=' + Date.now();
+    }
+
+    async function sendRemoteAuthAction(payload) {
+      if (!remoteAuthSessionId) return;
+      const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/action', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      const data = await readJsonResponse(response);
+      if (!response.ok || data.error) {
+        throw new Error(data?.error?.message || '원격 인증 조작에 실패했습니다.');
+      }
+      updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
+      await refreshRemoteAuthScreenshot();
+    }
+
+    async function typeRemoteAuthText() {
+      const value = document.getElementById('remote-auth-text').value;
+      if (!value) {
+        showRemoteAuthAlert('먼저 입력할 텍스트를 적어주세요.', 'info');
+        return;
+      }
+      try {
+        await sendRemoteAuthAction({ action: 'type', text: value });
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function sendRemoteAuthKey(key) {
+      try {
+        await sendRemoteAuthAction({ action: 'press', key: key });
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function waitRemoteAuth(ms) {
+      try {
+        await sendRemoteAuthAction({ action: 'wait', ms: ms });
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function manualRefreshRemoteAuth() {
+      try {
+        await refreshRemoteAuthStatus();
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function completeRemoteAuth() {
+      if (!remoteAuthSessionId) return;
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/complete', {
+          method: 'POST'
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showRemoteAuthAlert(data?.error?.message || '원격 인증 완료 처리에 실패했습니다.', 'error');
+          return;
+        }
+        showRemoteAuthAlert('배민 세션이 연결되었습니다. 설정 화면으로 돌아갑니다.', 'success');
+        stopRemoteAuthPolling();
+        setTimeout(function() {
+          window.location.href = remoteReturnTo;
+        }, 600);
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function cancelRemoteAuth() {
+      if (!remoteAuthSessionId) {
+        window.location.href = remoteReturnTo;
+        return;
+      }
+      try {
+        await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/cancel', {
+          method: 'POST'
+        });
+      } catch (error) {}
+      stopRemoteAuthPolling();
+      window.location.href = remoteReturnTo;
+    }
+
+    function stopRemoteAuthPolling() {
+      if (remoteAuthPollTimer) {
+        clearInterval(remoteAuthPollTimer);
+        remoteAuthPollTimer = null;
+      }
+    }
+
+    function startRemoteAuthPolling() {
+      stopRemoteAuthPolling();
+      remoteAuthPollTimer = setInterval(function() {
+        refreshRemoteAuthStatus().catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      }, 2500);
+    }
+
+    async function startRemoteAuth() {
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            platform_store_id: initialPlatformStoreId || null
+          })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showRemoteAuthAlert(data?.error?.message || '원격 인증 세션을 시작하지 못했습니다.', 'error');
+          return;
+        }
+        remoteAuthSessionId = data.session_id;
+        updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
+        await refreshRemoteAuthScreenshot();
+        startRemoteAuthPolling();
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    document.getElementById('remote-auth-screenshot').addEventListener('click', async function(event) {
+      if (!remoteAuthSnapshot?.viewport) {
+        showRemoteAuthAlert('원격 브라우저 해상도가 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.', 'info');
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      const relativeX = (event.clientX - rect.left) / rect.width;
+      const relativeY = (event.clientY - rect.top) / rect.height;
+      const x = Math.max(1, Math.round(relativeX * remoteAuthSnapshot.viewport.width));
+      const y = Math.max(1, Math.round(relativeY * remoteAuthSnapshot.viewport.height));
+      try {
+        await sendRemoteAuthAction({ action: 'click', x: x, y: y });
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    });
+
+    window.addEventListener('beforeunload', stopRemoteAuthPolling);
+
+    updateRemoteAuthStatus(null);
+    startRemoteAuth();
   </script>
 </body>
 </html>`
