@@ -2303,11 +2303,168 @@ function platformRemoteAuthPage(platform: string) {
     hint: '로그인과 추가 인증을 진행한 뒤 인증 완료를 눌러주세요.'
   };
 
-  return `${baseHead(meta.label + ' 인증')}
+  return `${baseHead(meta.label + ' 인증', `
+  <style>
+    .remote-auth-shell { --remote-auth-zoom: 1.55; }
+    .remote-auth-canvas {
+      overflow: auto;
+      max-height: calc(100vh - 290px);
+      min-height: 820px;
+      background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+      border-radius: 1.5rem;
+      border: 1px solid #E2E8F0;
+    }
+    .remote-auth-screenshot {
+      width: calc(100% * var(--remote-auth-zoom));
+      max-width: none;
+      display: block;
+      background: white;
+    }
+    .remote-auth-browser-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.85rem;
+      padding: 0.95rem 1rem;
+      border: 1px solid #E2E8F0;
+      border-bottom: none;
+      border-radius: 1.5rem 1.5rem 0 0;
+      background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%);
+    }
+    .remote-auth-browser-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      flex-shrink: 0;
+    }
+    .remote-auth-browser-dots span {
+      width: 11px;
+      height: 11px;
+      border-radius: 9999px;
+      display: inline-block;
+    }
+    .remote-auth-browser-dots span:nth-child(1) { background: #F87171; }
+    .remote-auth-browser-dots span:nth-child(2) { background: #FBBF24; }
+    .remote-auth-browser-dots span:nth-child(3) { background: #34D399; }
+    .remote-auth-browser-url {
+      min-height: 48px;
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 1rem;
+      border-radius: 9999px;
+      border: 1px solid #E2E8F0;
+      background: white;
+      color: #475569;
+      font-size: 0.95rem;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .remote-auth-browser-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      flex-shrink: 0;
+    }
+    .remote-auth-toolbar-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.45rem;
+      min-height: 48px;
+      border-radius: 0.9rem;
+      border: 1px solid #E2E8F0;
+      background: white;
+      color: #334155;
+      font-size: 0.94rem;
+      font-weight: 600;
+      transition: all 0.18s ease;
+    }
+    .remote-auth-toolbar-btn:hover {
+      background: #F8FAFC;
+      border-color: #CBD5E1;
+    }
+    .remote-auth-toolbar-btn.primary {
+      background: #F97316;
+      color: white;
+      border-color: #F97316;
+    }
+    .remote-auth-toolbar-btn.primary:hover {
+      background: #EA580C;
+      border-color: #EA580C;
+    }
+    .remote-auth-toolbar-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.95fr);
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .remote-auth-inline-card {
+      border: 1px solid #E2E8F0;
+      background: white;
+      border-radius: 1.35rem;
+      padding: 1rem;
+      box-shadow: 0 8px 26px rgba(15, 23, 42, 0.05);
+    }
+    .remote-auth-text-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 164px;
+      gap: 0.85rem;
+      margin-bottom: 0.85rem;
+    }
+    .remote-auth-key-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.75rem;
+    }
+    .remote-auth-nav-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 0.75rem;
+    }
+    .remote-auth-side-panel {
+      position: sticky;
+      top: 1.5rem;
+    }
+    @media (max-width: 1279px) {
+      .remote-auth-toolbar-grid {
+        grid-template-columns: 1fr;
+      }
+      .remote-auth-side-panel {
+        position: static;
+      }
+    }
+    @media (max-width: 768px) {
+      .remote-auth-shell { --remote-auth-zoom: 1.25; }
+      .remote-auth-browser-bar {
+        flex-wrap: wrap;
+      }
+      .remote-auth-browser-actions {
+        width: 100%;
+        justify-content: stretch;
+      }
+      .remote-auth-browser-actions button {
+        flex: 1;
+      }
+      .remote-auth-canvas {
+        min-height: 540px;
+        max-height: calc(100vh - 240px);
+      }
+      .remote-auth-text-row {
+        grid-template-columns: 1fr;
+      }
+      .remote-auth-key-grid,
+      .remote-auth-nav-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+  </style>
+  `)}
 <body class="bg-gray-50 min-h-screen">
   ${userSidebar('settings', false)}
-  <main class="ml-[72px] min-h-screen p-6">
-    <div class="max-w-6xl mx-auto">
+  <main class="ml-[72px] min-h-screen p-5 xl:p-6">
+    <div class="max-w-[1820px] mx-auto remote-auth-shell">
       <div class="mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <a href="/settings" class="inline-flex items-center gap-2 text-sm text-brand-600 hover:text-brand-700 mb-3">
@@ -2340,53 +2497,72 @@ function platformRemoteAuthPage(platform: string) {
 
       <div id="remote-auth-alert" class="hidden rounded-2xl border px-5 py-4 text-sm mb-6"></div>
 
-      <div class="grid xl:grid-cols-[1.35fr_0.65fr] gap-6">
+      <div class="grid xl:grid-cols-[minmax(0,1.45fr)_360px] gap-6 items-start">
         <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
           <div class="flex items-center justify-between gap-3 mb-4">
             <div>
               <div class="text-sm font-semibold text-gray-900">원격 브라우저 화면</div>
-              <div class="text-xs text-gray-400 mt-1">화면을 직접 클릭해 입력 칸에 포커스를 준 뒤, 오른쪽 도구로 입력/이동을 진행하세요.</div>
+              <div class="text-xs text-gray-400 mt-1">실제 브라우저처럼 화면을 크게 보고, 필요한 입력과 이동은 바로 아래 툴바에서 이어서 진행하세요.</div>
             </div>
             <div class="flex items-center gap-2">
-              <button onclick="manualRefreshRemoteAuth()" class="border border-gray-200 text-gray-600 px-3 py-2 rounded-xl text-sm hover:bg-gray-50 transition">새로고침</button>
-              <button onclick="cancelRemoteAuth()" class="border border-red-200 text-red-600 px-3 py-2 rounded-xl text-sm hover:bg-red-50 transition">인증 종료</button>
+              <button onclick="adjustRemoteAuthZoom(-0.15)" class="remote-auth-toolbar-btn px-3">축소</button>
+              <div id="remote-auth-zoom-label" class="text-xs font-semibold text-gray-500 min-w-[60px] text-center">155%</div>
+              <button onclick="adjustRemoteAuthZoom(0.15)" class="remote-auth-toolbar-btn px-3">확대</button>
+              <button onclick="resetRemoteAuthZoom()" class="remote-auth-toolbar-btn px-3">기본값</button>
             </div>
           </div>
-          <div class="rounded-2xl border border-dashed border-gray-200 bg-gray-50 overflow-hidden">
-            <img id="remote-auth-screenshot" alt="${meta.label} 인증 화면" class="w-full cursor-crosshair select-none block" />
+
+          <div class="remote-auth-browser-bar">
+            <div class="remote-auth-browser-dots">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <div id="remote-auth-toolbar-url" class="remote-auth-browser-url">원격 브라우저 준비 중...</div>
+            <div class="remote-auth-browser-actions">
+              <button onclick="manualRefreshRemoteAuth()" class="remote-auth-toolbar-btn px-4">새로고침</button>
+              <button onclick="cancelRemoteAuth()" class="remote-auth-toolbar-btn px-4 text-red-600 border-red-200 hover:bg-red-50">인증 종료</button>
+            </div>
           </div>
+
+          <div class="remote-auth-canvas">
+            <img id="remote-auth-screenshot" alt="${meta.label} 인증 화면" class="remote-auth-screenshot cursor-crosshair select-none" />
+          </div>
+
           <div class="mt-3 text-xs text-gray-500 flex flex-wrap items-center gap-3">
             <span id="remote-auth-resolution">해상도 확인 중...</span>
             <span id="remote-auth-session-id" class="break-all"></span>
           </div>
+
+          <div class="remote-auth-toolbar-grid">
+            <section class="remote-auth-inline-card">
+              <div class="text-sm font-semibold text-gray-900 mb-3">입력 도구</div>
+              <div class="remote-auth-text-row">
+                <input id="remote-auth-text" type="text" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none" placeholder="클릭한 입력칸에 바로 입력할 텍스트">
+                <button onclick="typeRemoteAuthText()" class="remote-auth-toolbar-btn primary">입력 보내기</button>
+              </div>
+              <div class="remote-auth-key-grid">
+                <button onclick="sendRemoteAuthKey('Backspace')" class="remote-auth-toolbar-btn">Backspace</button>
+                <button onclick="sendRemoteAuthKey('Tab')" class="remote-auth-toolbar-btn">Tab</button>
+                <button onclick="sendRemoteAuthKey('Enter')" class="remote-auth-toolbar-btn">Enter</button>
+              </div>
+            </section>
+
+            <section class="remote-auth-inline-card">
+              <div class="text-sm font-semibold text-gray-900 mb-3">탐색 도구</div>
+              <div class="remote-auth-nav-grid">
+                <button onclick="sendRemoteAuthAction({ action: 'reload' })" class="remote-auth-toolbar-btn">페이지 새로고침</button>
+                <button onclick="sendRemoteAuthAction({ action: 'back' })" class="remote-auth-toolbar-btn">뒤로가기</button>
+                <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 })" class="remote-auth-toolbar-btn">위로 스크롤</button>
+                <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 })" class="remote-auth-toolbar-btn">아래로 스크롤</button>
+                <button onclick="waitRemoteAuth(1500)" class="remote-auth-toolbar-btn">1.5초 대기</button>
+                <button onclick="waitRemoteAuth(3000)" class="remote-auth-toolbar-btn">3초 대기</button>
+              </div>
+            </section>
+          </div>
         </section>
 
-        <aside class="space-y-6">
-          <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
-            <div class="text-sm font-semibold text-gray-900 mb-4">입력 도구</div>
-            <div class="space-y-3">
-              <input id="remote-auth-text" type="text" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none" placeholder="클릭한 입력칸에 보낼 텍스트">
-              <div class="grid grid-cols-2 gap-3">
-                <button onclick="typeRemoteAuthText()" class="bg-brand-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">텍스트 입력</button>
-                <button onclick="sendRemoteAuthKey('Backspace')" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">Backspace</button>
-                <button onclick="sendRemoteAuthKey('Tab')" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">Tab</button>
-                <button onclick="sendRemoteAuthKey('Enter')" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">Enter</button>
-              </div>
-            </div>
-          </section>
-
-          <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
-            <div class="text-sm font-semibold text-gray-900 mb-4">탐색 도구</div>
-            <div class="grid grid-cols-2 gap-3">
-              <button onclick="sendRemoteAuthAction({ action: 'reload' })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">페이지 새로고침</button>
-              <button onclick="sendRemoteAuthAction({ action: 'back' })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">뒤로가기</button>
-              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">위로 스크롤</button>
-              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 })" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">아래로 스크롤</button>
-              <button onclick="waitRemoteAuth(1500)" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">1.5초 대기</button>
-              <button onclick="waitRemoteAuth(3000)" class="border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">3초 대기</button>
-            </div>
-          </section>
-
+        <aside class="space-y-6 remote-auth-side-panel">
           <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
             <div class="text-sm font-semibold text-gray-900 mb-2">완료 처리</div>
             <p class="text-xs text-gray-500 leading-6 mb-4">배민 운영 화면까지 진입했거나, 더 이상 네이버 인증/CAPTCHA 단계가 아닌 상태라면 아래 버튼으로 세션을 연결 완료 처리하세요.</p>
@@ -2409,6 +2585,7 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthSnapshot = null;
     let remoteAuthPollTimer = null;
     let remoteAuthScreenshotObjectUrl = null;
+    let remoteAuthZoom = window.innerWidth < 768 ? 1.25 : 1.55;
 
     function extractRemoteAuthSnapshot(payload) {
       if (!payload || typeof payload !== 'object') {
@@ -2448,6 +2625,27 @@ function platformRemoteAuthPage(platform: string) {
       el.classList.remove('hidden');
     }
 
+    function updateRemoteAuthZoomUi() {
+      const shell = document.querySelector('.remote-auth-shell');
+      const label = document.getElementById('remote-auth-zoom-label');
+      if (shell) {
+        shell.style.setProperty('--remote-auth-zoom', String(remoteAuthZoom));
+      }
+      if (label) {
+        label.textContent = Math.round(remoteAuthZoom * 100) + '%';
+      }
+    }
+
+    function adjustRemoteAuthZoom(delta) {
+      remoteAuthZoom = Math.max(1, Math.min(2.4, Number((remoteAuthZoom + delta).toFixed(2))));
+      updateRemoteAuthZoomUi();
+    }
+
+    function resetRemoteAuthZoom() {
+      remoteAuthZoom = window.innerWidth < 768 ? 1.25 : 1.55;
+      updateRemoteAuthZoomUi();
+    }
+
     function updateRemoteAuthStatus(snapshot) {
       remoteAuthSnapshot = snapshot || null;
       const pill = document.getElementById('remote-auth-status-pill');
@@ -2457,6 +2655,7 @@ function platformRemoteAuthPage(platform: string) {
       const completeButton = document.getElementById('remote-auth-complete-btn');
       const resolutionEl = document.getElementById('remote-auth-resolution');
       const sessionIdEl = document.getElementById('remote-auth-session-id');
+      const toolbarUrlEl = document.getElementById('remote-auth-toolbar-url');
 
       if (!snapshot) {
         pill.className = 'inline-flex items-center gap-2 text-xs bg-gray-100 text-gray-700 px-3 py-2 rounded-full';
@@ -2464,6 +2663,7 @@ function platformRemoteAuthPage(platform: string) {
         messageEl.textContent = '원격 인증 상태를 불러오는 중입니다.';
         urlEl.textContent = '-';
         titleEl.textContent = '-';
+        toolbarUrlEl.textContent = '원격 브라우저 준비 중...';
         completeButton.disabled = true;
         resolutionEl.textContent = '해상도 확인 중...';
         sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
@@ -2484,6 +2684,7 @@ function platformRemoteAuthPage(platform: string) {
       messageEl.textContent = snapshot.message || '상태 메시지가 없습니다.';
       urlEl.textContent = snapshot.current_url || '-';
       titleEl.textContent = snapshot.title || '-';
+      toolbarUrlEl.textContent = snapshot.current_url || '원격 브라우저 준비 중...';
       completeButton.disabled = !snapshot.can_complete;
       resolutionEl.textContent = snapshot.viewport ? ('원격 브라우저 해상도: ' + snapshot.viewport.width + ' x ' + snapshot.viewport.height) : '원격 브라우저 해상도 확인 중';
       sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
@@ -2671,6 +2872,7 @@ function platformRemoteAuthPage(platform: string) {
     window.addEventListener('beforeunload', stopRemoteAuthPolling);
 
     updateRemoteAuthStatus(null);
+    updateRemoteAuthZoomUi();
     startRemoteAuth();
   </script>
 </body>
