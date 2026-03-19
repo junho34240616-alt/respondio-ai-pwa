@@ -17,6 +17,7 @@
 const express = require('express');
 const cors = require('cors');
 const { chromium } = require('playwright');
+const { execSync } = require('child_process');
 
 const app = express();
 app.use(cors());
@@ -26,6 +27,29 @@ const PORT = process.env.PORT || process.env.CRAWLER_PORT || 4000;
 const WEBAPP_API = process.env.WEBAPP_API || 'http://localhost:3000/api/v1';
 const CRAWLER_SHARED_SECRET = process.env.CRAWLER_SHARED_SECRET || '';
 const CRAWLER_TEST_MODE = process.env.CRAWLER_TEST_MODE === '1';
+
+function detectFontStatus() {
+  try {
+    const nanum = execSync("fc-match 'NanumGothic' | head -n1", { encoding: 'utf8' }).trim();
+    const noto = execSync("fc-match 'Noto Sans CJK KR' | head -n1", { encoding: 'utf8' }).trim();
+    return {
+      locale: process.env.LANG || '',
+      nanum,
+      noto,
+      ready: Boolean(nanum || noto)
+    };
+  } catch (error) {
+    return {
+      locale: process.env.LANG || '',
+      nanum: '',
+      noto: '',
+      ready: false,
+      error: error.message
+    };
+  }
+}
+
+const FONT_STATUS = detectFontStatus();
 
 app.use((req, res, next) => {
   if (!CRAWLER_SHARED_SECRET || req.path === '/health') {
@@ -176,6 +200,7 @@ async function closePlatformSession(platform, storeId) {
 
 async function createPlatformSession(platform, storeId) {
   const sessionKey = getSessionKey(platform, storeId);
+  const viewport = { width: 1440, height: 1880 };
   const browser = await chromium.launch({
     headless: true,
     chromiumSandbox: false,
@@ -191,8 +216,10 @@ async function createPlatformSession(platform, storeId) {
 
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 720 },
+    viewport,
+    deviceScaleFactor: 2,
     locale: 'ko-KR',
+    timezoneId: 'Asia/Seoul',
     extraHTTPHeaders: {
       'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
     }
@@ -209,6 +236,7 @@ async function createPlatformSession(platform, storeId) {
     platform,
     storeId: normalizeStoreId(storeId),
     sessionKey,
+    viewport,
     loggedIn: false,
     lastActivity: Date.now()
   };
@@ -533,7 +561,7 @@ async function getRemoteAuthSnapshot(remoteSession) {
     current_url: currentUrl,
     title,
     can_complete: canComplete,
-    viewport: session.page.viewportSize() || { width: 1280, height: 720 }
+    viewport: session.viewport || session.page.viewportSize() || { width: 1440, height: 1880 }
   };
 }
 
@@ -1557,6 +1585,7 @@ app.get('/health', (req, res) => {
     mode: CRAWLER_TEST_MODE ? 'test' : 'live',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
+    fonts: FONT_STATUS,
     browser: Array.from(platformSessions.values()).some((session) => isSessionActive(session)) ? 'connected' : 'disconnected',
     sessions,
     jobs: {
