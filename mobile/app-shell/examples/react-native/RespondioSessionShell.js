@@ -40,6 +40,17 @@ function buildPostMessageScript(payload) {
   `;
 }
 
+const MOBILE_SAFARI_USER_AGENT =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+
+function getLoginUserAgent(platform) {
+  if (platform === 'coupang_eats' || platform === 'baemin' || platform === 'yogiyo') {
+    return MOBILE_SAFARI_USER_AGENT;
+  }
+
+  return undefined;
+}
+
 function getPlatformInstructions(platform, pageType = 'login') {
   if (pageType === 'review') {
     if (platform === 'baemin') {
@@ -131,7 +142,11 @@ export function RespondioSessionShell(props) {
     loading: false
   });
 
-  const sessionCenterUrl = useMemo(() => {
+  const appHomeUrl = useMemo(() => {
+    return String(appBaseUrl || '').replace(/\/$/, '') + '/reviews?app_shell=1';
+  }, [appBaseUrl]);
+
+  const sessionToolUrl = useMemo(() => {
     return String(appBaseUrl || '').replace(/\/$/, '') + '/mobile/session-center?app_shell=1';
   }, [appBaseUrl]);
 
@@ -251,7 +266,7 @@ function normalizeBridgePayload(payload) {
   function handleSessionCenterLoadEnd() {
     setIsBridgeReady(false);
     webViewRef.current?.injectJavaScript(sessionCenterBridgeBootstrapScript);
-    appendLog('세션 센터 브리지 재주입');
+    appendLog('웹앱 브리지 재주입');
   }
 
   function maybeAutoSubmitOutcome(outcome, sourceLabel) {
@@ -435,7 +450,33 @@ function normalizeBridgePayload(payload) {
 
   function reloadSessionCenter() {
     webViewRef.current?.reload();
-    appendLog('세션 센터 새로고침');
+    appendLog('현재 화면 새로고침');
+  }
+
+  function openSessionTool() {
+    if (!webViewRef.current) {
+      appendLog('메인 웹앱 화면이 준비되지 않아 세션 도구를 열지 못했습니다.');
+      return;
+    }
+
+    webViewRef.current.injectJavaScript(`
+      window.location.href = ${JSON.stringify(sessionToolUrl)};
+      true;
+    `);
+    appendLog('세션 도구 화면 열기');
+  }
+
+  function openReviewsHome() {
+    if (!webViewRef.current) {
+      appendLog('메인 웹앱 화면이 준비되지 않아 리뷰 관리로 돌아가지 못했습니다.');
+      return;
+    }
+
+    webViewRef.current.injectJavaScript(`
+      window.location.href = ${JSON.stringify(appHomeUrl)};
+      true;
+    `);
+    appendLog('리뷰 관리 화면으로 돌아가기');
   }
 
   function clearEventLog() {
@@ -455,9 +496,9 @@ function normalizeBridgePayload(payload) {
       View,
       { style: styles.card },
       React.createElement(Text, { style: styles.cardEyebrow }, 'Environment'),
-      React.createElement(Text, { style: styles.cardTitle }, '세션 센터 연결'),
+      React.createElement(Text, { style: styles.cardTitle }, '웹앱 연결 상태'),
       React.createElement(Text, { style: styles.cardText }, '앱 기본 URL: ' + appBaseUrl),
-      React.createElement(Text, { style: styles.cardText }, '현재 주소: ' + (sessionCenterNavState.url || sessionCenterUrl)),
+      React.createElement(Text, { style: styles.cardText }, '현재 주소: ' + (sessionCenterNavState.url || appHomeUrl)),
       React.createElement(
         Text,
         { style: [styles.cardText, isBridgeReady ? styles.statusSuccessText : styles.statusMutedText] },
@@ -468,13 +509,18 @@ function normalizeBridgePayload(payload) {
         { style: styles.inlineButtonRow },
         React.createElement(
           TouchableOpacity,
-          { style: styles.ghostButton, onPress: reloadSessionCenter },
-          React.createElement(Text, { style: styles.ghostButtonText }, sessionCenterNavState.loading ? '불러오는 중...' : '세션 센터 새로고침')
+          { style: styles.ghostButton, onPress: openSessionTool },
+          React.createElement(Text, { style: styles.ghostButtonText }, '플랫폼 연결 열기')
         ),
         React.createElement(
           TouchableOpacity,
-          { style: styles.ghostButton, onPress: clearEventLog },
-          React.createElement(Text, { style: styles.ghostButtonText }, '로그 지우기')
+          { style: styles.ghostButton, onPress: openReviewsHome },
+          React.createElement(Text, { style: styles.ghostButtonText }, '리뷰 관리로 이동')
+        ),
+        React.createElement(
+          TouchableOpacity,
+          { style: styles.ghostButton, onPress: reloadSessionCenter },
+          React.createElement(Text, { style: styles.ghostButtonText }, sessionCenterNavState.loading ? '불러오는 중...' : '새로고침')
         )
       )
     ),
@@ -562,18 +608,18 @@ function normalizeBridgePayload(payload) {
         React.createElement(
           View,
           { style: [styles.header, isCompact ? styles.headerCompact : null] },
-          React.createElement(Text, { style: styles.title }, 'Respondio Session Shell'),
-          React.createElement(Text, { style: styles.subtitle }, '원격 세션 센터를 WebView로 열고 직접 로그인 세션을 중계합니다.'),
+            React.createElement(Text, { style: styles.title }, 'Respondio Session Shell'),
+          React.createElement(Text, { style: styles.subtitle }, '기존 웹앱을 메인으로 쓰고, 필요할 때만 플랫폼 직접 로그인 세션을 연결합니다.'),
           React.createElement(
             View,
             { style: styles.inlineMetaRow },
-            React.createElement(Text, { style: styles.inlineMetaLabel }, 'Session Center'),
-            React.createElement(Text, { style: styles.inlineMetaValue }, sessionCenterNavState.url || sessionCenterUrl)
+            React.createElement(Text, { style: styles.inlineMetaLabel }, 'Current Page'),
+            React.createElement(Text, { style: styles.inlineMetaValue }, sessionCenterNavState.url || appHomeUrl)
           )
         ),
         React.createElement(WebView, {
           ref: webViewRef,
-          source: { uri: sessionCenterUrl },
+          source: { uri: appHomeUrl },
           onMessage: handleWebViewMessage,
           onNavigationStateChange: handleSessionCenterNavigationStateChange,
           onLoadEnd: handleSessionCenterLoadEnd,
@@ -596,13 +642,18 @@ function normalizeBridgePayload(payload) {
             { style: styles.compactToolbar },
             React.createElement(
               TouchableOpacity,
-              { style: styles.compactToolbarButton, onPress: () => setIsInspectorOpen(true) },
-              React.createElement(Text, { style: styles.compactToolbarButtonText }, activeRequest ? '로그인 도구 열기' : '세션 도구 열기')
+              { style: styles.compactToolbarButton, onPress: openSessionTool },
+              React.createElement(Text, { style: styles.compactToolbarButtonText }, '플랫폼 연결')
             ),
             React.createElement(
               TouchableOpacity,
-              { style: styles.compactToolbarGhostButton, onPress: reloadSessionCenter },
-              React.createElement(Text, { style: styles.compactToolbarGhostText }, '새로고침')
+              { style: styles.compactToolbarGhostButton, onPress: openReviewsHome },
+              React.createElement(Text, { style: styles.compactToolbarGhostText }, '리뷰 관리')
+            ),
+            React.createElement(
+              TouchableOpacity,
+              { style: styles.compactToolbarGhostButton, onPress: () => setIsInspectorOpen(true) },
+              React.createElement(Text, { style: styles.compactToolbarGhostText }, activeRequest ? '로그인 도구' : '세션 도구')
             )
           )
         : controlsContent
@@ -704,6 +755,7 @@ function normalizeBridgePayload(payload) {
           cacheEnabled: true,
           setSupportMultipleWindows: false,
           allowsBackForwardNavigationGestures: true,
+          userAgent: getLoginUserAgent(activeRequest.platform),
           style: styles.modalWebView
         }) : null,
         React.createElement(

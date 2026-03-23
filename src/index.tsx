@@ -2529,7 +2529,7 @@ function platformRemoteAuthPage(platform: string) {
             </div>
             <div class="flex items-center gap-2">
               <button onclick="adjustRemoteAuthZoom(-0.15)" class="remote-auth-toolbar-btn px-3">축소</button>
-              <div id="remote-auth-zoom-label" class="text-xs font-semibold text-gray-500 min-w-[60px] text-center">155%</div>
+              <div id="remote-auth-zoom-label" class="text-xs font-semibold text-gray-500 min-w-[60px] text-center">170%</div>
               <button onclick="adjustRemoteAuthZoom(0.15)" class="remote-auth-toolbar-btn px-3">확대</button>
               <button onclick="resetRemoteAuthZoom()" class="remote-auth-toolbar-btn px-3">기본값</button>
             </div>
@@ -2572,10 +2572,10 @@ function platformRemoteAuthPage(platform: string) {
               <button onclick="sendRemoteAuthKey('Backspace')" class="remote-auth-toolbar-btn">Backspace</button>
               <button onclick="sendRemoteAuthKey('Tab')" class="remote-auth-toolbar-btn">Tab</button>
               <button onclick="sendRemoteAuthKey('Enter')" class="remote-auth-toolbar-btn">Enter</button>
-              <button onclick="sendRemoteAuthAction({ action: 'reload' }, { refresh: 'deferred', delay: 320 })" class="remote-auth-toolbar-btn">새로고침</button>
-              <button onclick="sendRemoteAuthAction({ action: 'back' }, { refresh: 'deferred', delay: 320 })" class="remote-auth-toolbar-btn">뒤로가기</button>
-              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 }, { refresh: 'deferred', delay: 220 })" class="remote-auth-toolbar-btn">위로 스크롤</button>
-              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 }, { refresh: 'deferred', delay: 220 })" class="remote-auth-toolbar-btn">아래로 스크롤</button>
+              <button onclick="sendRemoteAuthAction({ action: 'reload' }, { refresh: 'deferred', delay: 180 })" class="remote-auth-toolbar-btn">새로고침</button>
+              <button onclick="sendRemoteAuthAction({ action: 'back' }, { refresh: 'deferred', delay: 180 })" class="remote-auth-toolbar-btn">뒤로가기</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 }, { refresh: 'deferred', delay: 120 })" class="remote-auth-toolbar-btn">위로 스크롤</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 }, { refresh: 'deferred', delay: 120 })" class="remote-auth-toolbar-btn">아래로 스크롤</button>
               <button onclick="waitRemoteAuth(1800)" class="remote-auth-toolbar-btn">잠시 대기</button>
             </div>
           </div>
@@ -2608,7 +2608,7 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthActionChain = Promise.resolve();
     let remoteAuthComposing = false;
     let remoteAuthSkipNextInput = false;
-    let remoteAuthZoom = window.innerWidth < 768 ? 1.55 : 2.05;
+    let remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
 
     function extractRemoteAuthSnapshot(payload) {
       if (!payload || typeof payload !== 'object') {
@@ -2665,7 +2665,7 @@ function platformRemoteAuthPage(platform: string) {
     }
 
     function resetRemoteAuthZoom() {
-      remoteAuthZoom = window.innerWidth < 768 ? 1.55 : 2.05;
+      remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
       updateRemoteAuthZoomUi();
     }
 
@@ -2809,7 +2809,7 @@ function platformRemoteAuthPage(platform: string) {
         input.value = '';
       }
       try {
-        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 260 });
+        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 150 });
         updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
@@ -2818,7 +2818,7 @@ function platformRemoteAuthPage(platform: string) {
 
     async function sendRemoteAuthKey(key) {
       try {
-        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 220 });
+        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 130 });
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2826,7 +2826,7 @@ function platformRemoteAuthPage(platform: string) {
 
     async function waitRemoteAuth(ms) {
       try {
-        await sendRemoteAuthAction({ action: 'wait', ms: ms }, { refresh: 'deferred', delay: 120 });
+        await sendRemoteAuthAction({ action: 'wait', ms: ms }, { refresh: 'deferred', delay: 80 });
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2931,11 +2931,11 @@ function platformRemoteAuthPage(platform: string) {
       const x = Math.max(1, Math.round(relativeX * remoteAuthSnapshot.viewport.width));
       const y = Math.max(1, Math.round(relativeY * remoteAuthSnapshot.viewport.height));
       try {
-        await sendRemoteAuthAction({ action: 'click', x: x, y: y }, { refresh: 'deferred', delay: 220 });
         updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
         if (remoteAuthCaptureInputEl) {
           remoteAuthCaptureInputEl.focus();
         }
+        await sendRemoteAuthAction({ action: 'click', x: x, y: y }, { refresh: 'deferred', delay: 120 });
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2944,7 +2944,7 @@ function platformRemoteAuthPage(platform: string) {
     remoteAuthScreenshotEl.addEventListener('wheel', function(event) {
       event.preventDefault();
       const deltaY = event.deltaY > 0 ? 480 : -480;
-      sendRemoteAuthAction({ action: 'scroll', deltaY: deltaY }, { refresh: 'deferred', delay: 200 });
+      sendRemoteAuthAction({ action: 'scroll', deltaY: deltaY }, { refresh: 'deferred', delay: 120 });
     }, { passive: false });
 
     remoteAuthCaptureInputEl.addEventListener('compositionstart', function() {

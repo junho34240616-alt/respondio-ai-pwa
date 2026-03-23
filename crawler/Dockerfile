@@ -11,8 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   fontconfig \
   fonts-nanum \
   fonts-nanum-extra \
+  fonts-noto-core \
   fonts-noto-cjk \
+  fonts-noto-cjk-extra \
   fonts-noto-color-emoji \
+  fonts-unfonts-core \
   locales \
   && locale-gen ko_KR.UTF-8 \
   && fc-cache -f -v \

@@ -20,6 +20,32 @@ test('baemin naver captcha is treated as user action, not failure', () => {
   assert.equal(shouldAutoSubmitOutcome(outcome), false);
 });
 
+test('baemin selfservice start page is not auto-submitted as connected', () => {
+  const outcome = detectPlatformLoginOutcome({
+    platform: 'baemin',
+    url: 'https://self.baemin.com/start',
+    title: '배민셀프서비스',
+    bodyText: '셀프서비스 시작하기 회사소개 이용약관 개인정보처리방침'
+  });
+
+  assert.equal(outcome.decision, 'needs_user_action');
+  assert.equal(outcome.sessionStatus, null);
+  assert.equal(shouldAutoSubmitOutcome(outcome), false);
+});
+
+test('baemin review page is treated as connected', () => {
+  const outcome = detectPlatformLoginOutcome({
+    platform: 'baemin',
+    url: 'https://self.baemin.com/reviews',
+    title: '배달의민족 사장님사이트',
+    bodyText: '리뷰관리 주문접수 매장관리'
+  });
+
+  assert.equal(outcome.decision, 'connected');
+  assert.equal(outcome.sessionStatus, 'connected');
+  assert.equal(shouldAutoSubmitOutcome(outcome), true);
+});
+
 test('coupang access denied is treated as blocked error', () => {
   const outcome = detectPlatformLoginOutcome({
     platform: 'coupang_eats',

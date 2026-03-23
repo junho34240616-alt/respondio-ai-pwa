@@ -32,11 +32,15 @@ function detectFontStatus() {
   try {
     const nanum = execSync("fc-match 'NanumGothic' | head -n1", { encoding: 'utf8' }).trim();
     const noto = execSync("fc-match 'Noto Sans CJK KR' | head -n1", { encoding: 'utf8' }).trim();
+    const hasNanum = /nanum/i.test(nanum);
+    const hasNotoKr = /noto/i.test(noto) && /(cjk|kr)/i.test(noto);
     return {
       locale: process.env.LANG || '',
       nanum,
       noto,
-      ready: Boolean(nanum || noto)
+      ready: hasNanum || hasNotoKr,
+      hasNanum,
+      hasNotoKr
     };
   } catch (error) {
     return {
@@ -44,12 +48,36 @@ function detectFontStatus() {
       nanum: '',
       noto: '',
       ready: false,
+      hasNanum: false,
+      hasNotoKr: false,
       error: error.message
     };
   }
 }
 
 const FONT_STATUS = detectFontStatus();
+const REMOTE_AUTH_FONT_STYLE = `
+html, body, input, textarea, button, select, option, label, span, div, p, a, li, dt, dd, th, td {
+  font-family: "NanumGothic", "Nanum Gothic", "NanumBarunGothic", "Nanum Myeongjo", "Noto Sans CJK KR", "Noto Sans KR", "UnDotum", "Malgun Gothic", sans-serif !important;
+  font-variant-ligatures: none !important;
+}
+`;
+const REMOTE_AUTH_SCREENSHOT_OPTIONS = {
+  type: 'png',
+  scale: 'css',
+  animations: 'disabled',
+  caret: 'hide',
+  timeout: 4000,
+  style: REMOTE_AUTH_FONT_STYLE
+};
+const REMOTE_AUTH_FALLBACK_SCREENSHOT_OPTIONS = {
+  type: 'png',
+  scale: 'css',
+  timeout: 0,
+  style: REMOTE_AUTH_FONT_STYLE
+};
+const REMOTE_AUTH_ACTION_SETTLE_MS = 120;
+const REMOTE_AUTH_TYPING_DELAY_MS = 8;
 
 app.use((req, res, next) => {
   if (!CRAWLER_SHARED_SECRET || req.path === '/health') {
@@ -200,7 +228,7 @@ async function closePlatformSession(platform, storeId) {
 
 async function createPlatformSession(platform, storeId) {
   const sessionKey = getSessionKey(platform, storeId);
-  const viewport = { width: 1440, height: 1880 };
+  const viewport = { width: 1280, height: 1760 };
   const browser = await chromium.launch({
     headless: true,
     chromiumSandbox: false,
@@ -238,7 +266,9 @@ async function createPlatformSession(platform, storeId) {
     sessionKey,
     viewport,
     loggedIn: false,
-    lastActivity: Date.now()
+    lastActivity: Date.now(),
+    lastScreenshot: null,
+    lastScreenshotAt: null
   };
   platformSessions.set(sessionKey, sessionData);
   return sessionData;
@@ -1685,7 +1715,23 @@ app.get('/remote-auth/:sessionId/screenshot', async (req, res) => {
   }
 
   try {
-    const image = await session.page.screenshot({ type: 'png' });
+    let image = null;
+    try {
+      image = await session.page.screenshot(REMOTE_AUTH_SCREENSHOT_OPTIONS);
+    } catch (primaryError) {
+      try {
+        image = await session.page.screenshot(REMOTE_AUTH_FALLBACK_SCREENSHOT_OPTIONS);
+      } catch (fallbackError) {
+        if (session.lastScreenshot) {
+          image = session.lastScreenshot;
+        } else {
+          throw fallbackError;
+        }
+      }
+    }
+
+    session.lastScreenshot = image;
+    session.lastScreenshotAt = Date.now();
     session.lastActivity = Date.now();
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -1713,7 +1759,7 @@ app.post('/remote-auth/:sessionId/action', async (req, res) => {
     if (action === 'click') {
       await session.page.mouse.click(Number(x || 0), Number(y || 0));
     } else if (action === 'type') {
-      await session.page.keyboard.type(String(text || ''), { delay: 20 });
+      await session.page.keyboard.type(String(text || ''), { delay: REMOTE_AUTH_TYPING_DELAY_MS });
     } else if (action === 'press') {
       await session.page.keyboard.press(String(key || 'Enter'));
     } else if (action === 'scroll') {
@@ -1730,7 +1776,7 @@ app.post('/remote-auth/:sessionId/action', async (req, res) => {
       return res.status(400).json({ success: false, error: '지원하지 않는 원격 인증 액션입니다.' });
     }
 
-    await session.page.waitForTimeout(400);
+    await session.page.waitForTimeout(REMOTE_AUTH_ACTION_SETTLE_MS);
     session.lastActivity = Date.now();
 
     const snapshot = await getRemoteAuthSnapshot(remoteSession);

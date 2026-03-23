@@ -132,18 +132,59 @@ function detectGenericOutcome(signals) {
 
 function detectBaemin(signals) {
   const combinedText = [signals.title, signals.bodyText].filter(Boolean).join(' ');
-
-  if (
+  const isBaeminInternalUrl =
     signals.url.includes('self.baemin.com') &&
     !signals.url.includes('/login') &&
     !signals.url.includes('/bridge') &&
-    !signals.url.includes('nid.naver.com')
-  ) {
+    !signals.url.includes('nid.naver.com');
+  const isBaeminStartPage = containsAny(combinedText, [
+    '셀프서비스 시작하기',
+    '셀프 서비스 시작하기',
+    '배민셀프서비스',
+    'wowoa brothers',
+    '회사소개',
+    '이용약관',
+    '개인정보처리방침'
+  ]);
+  const hasStrongBaeminConnectedSignal =
+    containsAny(combinedText, [
+      '리뷰관리',
+      '리뷰 관리',
+      '주문접수',
+      '주문 현황',
+      '매장관리',
+      '정산',
+      '광고관리',
+      '광고 센터',
+      '사장님광장',
+      '사장님 사이트',
+      '매출',
+      '운영 현황'
+    ]) || containsAny(signals.url, [
+      '/reviews',
+      '/orders',
+      '/settlements',
+      '/ads',
+      '/store',
+      '/shops'
+    ]);
+
+  if (isBaeminInternalUrl && isBaeminStartPage) {
+    return makeOutcome({
+      decision: 'needs_user_action',
+      reason: '배민 셀프서비스 시작 화면입니다. "셀프서비스 시작하기" 이후 실제 운영 화면까지 계속 진행해 주세요.',
+      confidence: 0.82,
+      nextAction: 'user_action',
+      evidence: ['baemin:start-page']
+    });
+  }
+
+  if (isBaeminInternalUrl && hasStrongBaeminConnectedSignal) {
     return makeOutcome({
       decision: 'connected',
       sessionStatus: 'connected',
-      reason: '배달의민족 사장님 사이트 내부 페이지로 이동했습니다.',
-      confidence: 0.96,
+      reason: '배달의민족 사장님 운영 화면으로 이동했습니다.',
+      confidence: 0.94,
       nextAction: 'continue',
       evidence: ['baemin:internal-page']
     });
@@ -187,7 +228,7 @@ function detectBaemin(signals) {
   return makeOutcome({
     decision: 'unknown',
     reason: '배달의민족 로그인 상태를 아직 확정하기 어렵습니다.',
-    confidence: 0.35,
+    confidence: 0.4,
     nextAction: 'wait',
     evidence: ['baemin:unknown']
   });
