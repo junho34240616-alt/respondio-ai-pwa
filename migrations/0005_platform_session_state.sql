@@ -1,0 +1,1 @@
+ALTER TABLE store_platform_connections ADD COLUMN session_state_encrypted TEXT;

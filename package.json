@@ -4,7 +4,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test --experimental-strip-types --experimental-specifier-resolution=node src/services/auth.test.ts src/routes/api.smoke.test.ts mobile/app-shell/www/platformLoginHeuristics.test.js",
+    "test": "node scripts/run-node-tests.mjs",
     "test:e2e": "node scripts/local-e2e.mjs",
     "doctor:prod": "node scripts/production-doctor.mjs",
     "preview": "wrangler pages dev",

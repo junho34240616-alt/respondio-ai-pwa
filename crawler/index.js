@@ -76,8 +76,9 @@ const REMOTE_AUTH_FALLBACK_SCREENSHOT_OPTIONS = {
   timeout: 0,
   style: REMOTE_AUTH_FONT_STYLE
 };
-const REMOTE_AUTH_ACTION_SETTLE_MS = 120;
-const REMOTE_AUTH_TYPING_DELAY_MS = 8;
+const REMOTE_AUTH_SCREENSHOT_CACHE_MS = 250;
+const REMOTE_AUTH_SCREENSHOT_PREWARM_DELAY_MS = 40;
+const REMOTE_AUTH_TYPING_DELAY_MS = 0;
 
 app.use((req, res, next) => {
   if (!CRAWLER_SHARED_SECRET || req.path === '/health') {
@@ -115,6 +116,59 @@ function createRemoteAuthSessionId() {
   }
 
   return `remote_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function requestWebappSessionState(method, platform, storeId, payload = null) {
+  const normalizedStoreId = normalizeStoreId(storeId);
+  const url = new URL(`${WEBAPP_API}/crawler/platform-session-state`);
+  url.searchParams.set('platform', platform);
+  url.searchParams.set('store_id', String(normalizedStoreId));
+
+  const response = await fetch(method === 'GET' ? url.toString() : `${WEBAPP_API}/crawler/platform-session-state`, {
+    method,
+    headers: {
+      ...(CRAWLER_SHARED_SECRET ? { 'X-Crawler-Secret': CRAWLER_SHARED_SECRET } : {}),
+      ...(method === 'GET' ? {} : { 'Content-Type': 'application/json' })
+    },
+    ...(method === 'GET'
+      ? {}
+      : {
+          body: JSON.stringify({
+            platform,
+            store_id: normalizedStoreId,
+            ...(payload || {})
+          })
+        })
+  });
+
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.success === false) {
+    throw new Error(result?.error?.message || result?.error || result?.message || '웹앱 세션 상태 요청에 실패했습니다.');
+  }
+
+  return result;
+}
+
+async function readSavedSessionState(platform, storeId) {
+  try {
+    const result = await requestWebappSessionState('GET', platform, storeId);
+    return result?.session_state ? { state: result.session_state } : null;
+  } catch (error) {
+    console.warn(`[${platform}] 저장 세션 조회 실패: ${error.message}`);
+    return null;
+  }
+}
+
+async function hasSavedSessionState(platform, storeId) {
+  return !!(await readSavedSessionState(platform, storeId));
+}
+
+async function deleteSavedSessionState(platform, storeId) {
+  try {
+    await requestWebappSessionState('POST', platform, storeId, { clear: true });
+  } catch (error) {
+    console.warn(`[${platform}] 저장 세션 삭제 실패: ${error.message}`);
+  }
 }
 
 // ============================================================
@@ -228,7 +282,9 @@ async function closePlatformSession(platform, storeId) {
 
 async function createPlatformSession(platform, storeId) {
   const sessionKey = getSessionKey(platform, storeId);
+  const normalizedStoreId = normalizeStoreId(storeId);
   const viewport = { width: 1280, height: 1760 };
+  const savedState = await readSavedSessionState(platform, normalizedStoreId);
   const browser = await chromium.launch({
     headless: true,
     chromiumSandbox: false,
@@ -248,6 +304,7 @@ async function createPlatformSession(platform, storeId) {
     deviceScaleFactor: 2,
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',
+    ...(savedState?.state ? { storageState: savedState.state } : {}),
     extraHTTPHeaders: {
       'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
     }
@@ -262,14 +319,27 @@ async function createPlatformSession(platform, storeId) {
     context,
     page,
     platform,
-    storeId: normalizeStoreId(storeId),
+    storeId: normalizedStoreId,
     sessionKey,
     viewport,
     loggedIn: false,
     lastActivity: Date.now(),
     lastScreenshot: null,
-    lastScreenshotAt: null
+    lastScreenshotAt: null,
+    pendingScreenshotPromise: null,
+    screenshotDirty: true,
+    hasSavedSessionState: !!savedState
   };
+
+  const markVisualChange = () => {
+    sessionData.lastActivity = Date.now();
+    sessionData.screenshotDirty = true;
+  };
+
+  page.on('domcontentloaded', markVisualChange);
+  page.on('load', markVisualChange);
+  page.on('framenavigated', markVisualChange);
+
   platformSessions.set(sessionKey, sessionData);
   return sessionData;
 }
@@ -288,6 +358,159 @@ async function getContext(platform, storeId, options = {}) {
   }
 
   return createPlatformSession(platform, storeId);
+}
+
+function getRemoteAuthActionSettleMs(action) {
+  if (action === 'reload' || action === 'back' || action === 'goto') return 170;
+  if (action === 'click') return 45;
+  if (action === 'press') return 30;
+  if (action === 'type') return 15;
+  if (action === 'wait') return 0;
+  return 0;
+}
+
+async function captureRemoteAuthScreenshot(session, options = {}) {
+  const { force = false, delayMs = 0 } = options;
+  if (!isSessionActive(session)) {
+    throw new Error('원격 인증 세션이 종료되었습니다.');
+  }
+
+  const cacheIsFresh = session.lastScreenshot && session.lastScreenshotAt && (Date.now() - session.lastScreenshotAt) < REMOTE_AUTH_SCREENSHOT_CACHE_MS;
+  if (!force && !session.screenshotDirty && cacheIsFresh) {
+    return session.lastScreenshot;
+  }
+
+  if (session.pendingScreenshotPromise) {
+    return session.pendingScreenshotPromise;
+  }
+
+  const task = (async () => {
+    if (delayMs > 0) {
+      await session.page.waitForTimeout(delayMs).catch(() => {});
+    }
+
+    let image = null;
+    try {
+      image = await session.page.screenshot(REMOTE_AUTH_SCREENSHOT_OPTIONS);
+    } catch (primaryError) {
+      try {
+        image = await session.page.screenshot(REMOTE_AUTH_FALLBACK_SCREENSHOT_OPTIONS);
+      } catch (fallbackError) {
+        if (session.lastScreenshot) {
+          image = session.lastScreenshot;
+        } else {
+          throw fallbackError;
+        }
+      }
+    }
+
+    session.lastScreenshot = image;
+    session.lastScreenshotAt = Date.now();
+    session.lastActivity = Date.now();
+    session.screenshotDirty = false;
+    return image;
+  })().finally(() => {
+    if (session.pendingScreenshotPromise === task) {
+      session.pendingScreenshotPromise = null;
+    }
+  });
+
+  session.pendingScreenshotPromise = task;
+  return task;
+}
+
+function prewarmRemoteAuthScreenshot(session, delayMs = REMOTE_AUTH_SCREENSHOT_PREWARM_DELAY_MS) {
+  if (!session) return null;
+  session.screenshotDirty = true;
+  return captureRemoteAuthScreenshot(session, { force: true, delayMs }).catch(() => null);
+}
+
+async function persistPlatformSessionState(session) {
+  if (!isSessionActive(session) || !session.context) {
+    throw new Error('세션 상태를 저장할 활성 브라우저 컨텍스트가 없습니다.');
+  }
+
+  const state = await session.context.storageState();
+  await requestWebappSessionState('POST', session.platform, session.storeId, { session_state: state });
+  session.hasSavedSessionState = true;
+  session.lastPersistedAt = Date.now();
+  return true;
+}
+
+function serializePlatformSession(session) {
+  return {
+    name: PLATFORMS[session.platform]?.name || session.platform,
+    platform: session.platform,
+    storeId: session.storeId,
+    loggedIn: session.loggedIn,
+    lastActivity: session.lastActivity ? new Date(session.lastActivity).toISOString() : null,
+    hasSavedSessionState: !!session.hasSavedSessionState
+  };
+}
+
+async function restoreSavedPlatformSession(platform, storeId, options = {}) {
+  const config = PLATFORMS[platform];
+  if (!config) {
+    throw new Error(`Unsupported platform: ${platform}`);
+  }
+
+  const normalizedStoreId = normalizeStoreId(storeId);
+  const savedState = await readSavedSessionState(platform, normalizedStoreId);
+  if (!savedState) {
+    return {
+      success: false,
+      restored: false,
+      platform,
+      message: '저장된 플랫폼 세션이 없습니다.'
+    };
+  }
+
+  const session = await getContext(platform, normalizedStoreId, { fresh: true });
+
+  try {
+    await session.page.goto(config.reviewUrl || config.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await session.page.waitForTimeout(1200);
+
+    const currentUrl = session.page.url();
+    session.loggedIn = isLoginSuccessUrl(platform, currentUrl);
+    session.lastActivity = Date.now();
+    session.screenshotDirty = true;
+
+    if (!session.loggedIn) {
+      const loginSurfaceVisible = await hasVisibleLoginSurface(session.page, config).catch(() => false);
+      const diagnostics = await getPageDiagnostics(session.page);
+      const failureMessage = deriveLoginFailureMessage(platform, currentUrl, diagnostics);
+
+      if (loginSurfaceVisible) {
+        await deleteSavedSessionState(platform, normalizedStoreId);
+      }
+
+      await closePlatformSession(platform, normalizedStoreId);
+      return {
+        success: false,
+        restored: false,
+        platform,
+        message: failureMessage
+      };
+    }
+
+    await persistPlatformSessionState(session).catch(() => null);
+    return {
+      success: true,
+      restored: true,
+      platform,
+      session,
+      message: '저장된 플랫폼 세션을 복원했습니다.'
+    };
+  } catch (error) {
+    await closePlatformSession(platform, normalizedStoreId);
+    return {
+      success: false,
+      restored: false,
+      platform,
+      message: `저장된 세션 복원 실패: ${error.message}`
+    };
+  }
 }
 
 async function waitForVisibleSelector(page, selector, timeout = 15000) {
@@ -551,7 +774,9 @@ async function getRemoteAuthSnapshot(remoteSession) {
 
   const currentUrl = session.page.url();
   const title = await session.page.title().catch(() => '');
-  const bodyText = await session.page.locator('body').innerText().catch(() => '');
+  const bodyText = await session.page.evaluate(() => {
+    return (document.body?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 1500);
+  }).catch(() => '');
   const normalizedBody = String(bodyText || '').toLowerCase();
   const canComplete = isLoginSuccessUrl(remoteSession.platform, currentUrl);
 
@@ -1259,6 +1484,10 @@ async function loginPlatform(platform, storeId, credentials) {
       };
     }
 
+    await persistPlatformSessionState(session).catch((persistError) => {
+      console.warn(`[${config.name}] 세션 상태 저장 실패: ${persistError.message}`);
+    });
+
     return {
       success: session.loggedIn,
       platform,
@@ -1287,23 +1516,27 @@ async function loginPlatform(platform, storeId, credentials) {
 /**
  * 리뷰 수집
  */
-async function fetchReviews(platform, storeId, options = {}) {
+async function fetchReviews(platform, storeId) {
   const config = PLATFORMS[platform];
   if (!config) throw new Error(`Unsupported platform: ${platform}`);
   const normalizedStoreId = normalizeStoreId(storeId);
-  const session = platformSessions.get(getSessionKey(platform, normalizedStoreId));
-  
-  // 데모 모드: 실제 크롤링 없이 시뮬레이션 데이터 반환
-  if (options.demo) {
-    console.log(`[${config.name}] 데모 모드로 리뷰 수집 시뮬레이션`);
-    return generateDemoReviews(platform, normalizedStoreId);
+  let session = platformSessions.get(getSessionKey(platform, normalizedStoreId));
+
+  if (!isSessionActive(session) || !session?.loggedIn) {
+    const restored = await restoreSavedPlatformSession(platform, normalizedStoreId);
+    if (restored.success && restored.session) {
+      session = restored.session;
+    }
   }
 
   if (!isSessionActive(session) || !session?.loggedIn) {
+    const savedSessionExists = await hasSavedSessionState(platform, normalizedStoreId).catch(() => false);
     return {
       success: false,
       platform,
-      error: '플랫폼 운영 세션이 연결되어 있지 않습니다. 설정 화면에서 계정 연결을 다시 시도해주세요.',
+      error: savedSessionExists
+        ? '저장된 플랫폼 세션을 복원하지 못했습니다. 설정 화면에서 다시 인증해주세요.'
+        : '플랫폼 운영 세션이 연결되어 있지 않습니다. 설정 화면에서 계정 연결을 다시 시도해주세요.',
       reviews: []
     };
   }
@@ -1427,9 +1660,15 @@ async function postReply(platform, storeId, reviewId, replyText) {
   const config = PLATFORMS[platform];
   if (!config) throw new Error(`Unsupported platform: ${platform}`);
   const normalizedStoreId = normalizeStoreId(storeId);
-  const session = platformSessions.get(getSessionKey(platform, normalizedStoreId));
+  let session = platformSessions.get(getSessionKey(platform, normalizedStoreId));
   
-  // 데모 모드
+  if (!isSessionActive(session) || !session?.loggedIn) {
+    const restored = await restoreSavedPlatformSession(platform, normalizedStoreId);
+    if (restored.success && restored.session) {
+      session = restored.session;
+    }
+  }
+
   if (!isSessionActive(session) || !session?.loggedIn) {
     console.log(`[${config.name}] 운영 세션이 없어 답변 게시를 중단합니다. (review: ${reviewId})`);
     return {
@@ -1492,50 +1731,8 @@ async function postReply(platform, storeId, reviewId, replyText) {
 }
 
 // ============================================================
-//  DEMO DATA GENERATOR
+//  TEST DATA GENERATOR
 // ============================================================
-function generateDemoReviews(platform, storeId) {
-  const platformNames = { baemin: '배달의민족', coupang_eats: '쿠팡이츠', yogiyo: '요기요' };
-  
-  const demoReviews = {
-    baemin: [
-      { customer_name: '이지은', rating: 5, review_text: '양념치킨 진짜 맛있어요! 소스도 넉넉하고 배달도 빨랐습니다.', menu_items: '["양념치킨","감자튀김"]', sentiment: 'positive' },
-      { customer_name: '김준혁', rating: 3, review_text: '치킨은 맛있는데 배달이 좀 늦었어요. 40분 넘게 걸렸습니다.', menu_items: '["후라이드치킨","콜라"]', sentiment: 'negative' },
-      { customer_name: '박서연', rating: 4, review_text: '간장치킨 좋아요! 다음에도 시킬게요.', menu_items: '["간장치킨"]', sentiment: 'positive' },
-    ],
-    coupang_eats: [
-      { customer_name: '최민호', rating: 5, review_text: '쿠팡이츠로 처음 시켰는데 너무 맛있어요! 포장도 깔끔합니다.', menu_items: '["양념치킨","치즈볼"]', sentiment: 'positive' },
-      { customer_name: '한수진', rating: 2, review_text: '양이 너무 적어요. 가격 대비 실망이네요.', menu_items: '["불고기 덮밥"]', sentiment: 'negative' },
-    ],
-    yogiyo: [
-      { customer_name: '송지우', rating: 4, review_text: '떡볶이 맛있어요! 근데 순대가 좀 차가웠어요.', menu_items: '["떡볶이","순대","튀김"]', sentiment: 'neutral' },
-      { customer_name: '윤채원', rating: 5, review_text: '사장님 서비스 최고! 항상 잘 먹고 있습니다.', menu_items: '["양념치킨","감자튀김"]', sentiment: 'positive' },
-    ]
-  };
-
-  const reviews = (demoReviews[platform] || demoReviews.baemin).map((r, i) => ({
-    ...r,
-    platform_review_id: `${platform}_demo_${Date.now()}_${i}`,
-    platform,
-    store_id: storeId,
-    status: 'pending',
-    customer_type: Math.random() > 0.7 ? 'loyal' : Math.random() > 0.5 ? 'repeat' : 'new',
-    is_repeat_customer: Math.random() > 0.5 ? 1 : 0,
-    created_at: new Date().toISOString()
-  }));
-
-  return {
-    success: true,
-    platform,
-    platform_name: platformNames[platform],
-    store_id: storeId,
-    reviews,
-    fetched_at: new Date().toISOString(),
-    count: reviews.length,
-    mode: 'demo'
-  };
-}
-
 function generateOperationalMockReviews(platform, storeId) {
   const platformNames = { baemin: '배달의민족', coupang_eats: '쿠팡이츠', yogiyo: '요기요' };
   const liveMockReviews = {
@@ -1671,6 +1868,7 @@ app.post('/remote-auth/start', async (req, res) => {
       lastError: null
     };
     remoteAuthSessions.set(sessionId, remoteSession);
+    prewarmRemoteAuthScreenshot(session, 0);
 
     const snapshot = await getRemoteAuthSnapshot(remoteSession);
     res.json({
@@ -1715,24 +1913,7 @@ app.get('/remote-auth/:sessionId/screenshot', async (req, res) => {
   }
 
   try {
-    let image = null;
-    try {
-      image = await session.page.screenshot(REMOTE_AUTH_SCREENSHOT_OPTIONS);
-    } catch (primaryError) {
-      try {
-        image = await session.page.screenshot(REMOTE_AUTH_FALLBACK_SCREENSHOT_OPTIONS);
-      } catch (fallbackError) {
-        if (session.lastScreenshot) {
-          image = session.lastScreenshot;
-        } else {
-          throw fallbackError;
-        }
-      }
-    }
-
-    session.lastScreenshot = image;
-    session.lastScreenshotAt = Date.now();
-    session.lastActivity = Date.now();
+    const image = await captureRemoteAuthScreenshot(session);
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     res.end(image);
@@ -1753,7 +1934,7 @@ app.post('/remote-auth/:sessionId/action', async (req, res) => {
     return res.status(410).json({ success: false, error: '원격 인증 세션이 종료되었습니다.' });
   }
 
-  const { action, x, y, text, key, deltaY, url } = req.body || {};
+  const { action, x, y, text, key, deltaY, url, ms } = req.body || {};
 
   try {
     if (action === 'click') {
@@ -1771,20 +1952,25 @@ app.post('/remote-auth/:sessionId/action', async (req, res) => {
     } else if (action === 'goto' && url) {
       await session.page.goto(String(url), { waitUntil: 'domcontentloaded', timeout: 30000 });
     } else if (action === 'wait') {
-      await session.page.waitForTimeout(Math.max(200, Math.min(Number(deltaY || 800), 5000)));
+      await session.page.waitForTimeout(Math.max(200, Math.min(Number(ms || 800), 5000)));
     } else {
       return res.status(400).json({ success: false, error: '지원하지 않는 원격 인증 액션입니다.' });
     }
 
-    await session.page.waitForTimeout(REMOTE_AUTH_ACTION_SETTLE_MS);
-    session.lastActivity = Date.now();
+    const settleMs = getRemoteAuthActionSettleMs(action);
+    if (settleMs > 0) {
+      await session.page.waitForTimeout(settleMs);
+    }
 
-    const snapshot = await getRemoteAuthSnapshot(remoteSession);
+    session.lastActivity = Date.now();
+    session.screenshotDirty = true;
+    prewarmRemoteAuthScreenshot(session);
     res.json({
       success: true,
       session_id: remoteSession.sessionId,
       platform: remoteSession.platform,
-      ...snapshot
+      action,
+      acknowledged: true
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -1817,11 +2003,18 @@ app.post('/remote-auth/:sessionId/complete', async (req, res) => {
     remoteSession.status = 'connected';
     remoteSession.updatedAt = Date.now();
 
+    let persistenceWarning = null;
+    await persistPlatformSessionState(session).catch((error) => {
+      persistenceWarning = `세션 저장 경고: ${error.message}`;
+      console.warn(`[${remoteSession.platform}] ${persistenceWarning}`);
+    });
+
     res.json({
       success: true,
       platform: remoteSession.platform,
       store_id: remoteSession.storeId,
-      message: '원격 인증 세션이 연결되었습니다.'
+      message: '원격 인증 세션이 연결되었습니다.',
+      warning: persistenceWarning
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
@@ -1840,7 +2033,7 @@ app.post('/remote-auth/:sessionId/cancel', async (req, res) => {
 
 // 리뷰 수집
 app.post('/fetch-reviews', async (req, res) => {
-  const { platform, store_id, demo } = req.body;
+  const { platform, store_id } = req.body;
   
   if (!platform || !PLATFORMS[platform]) {
     return res.status(400).json({ error: 'Invalid platform', supported: Object.keys(PLATFORMS) });
@@ -1851,7 +2044,7 @@ app.post('/fetch-reviews', async (req, res) => {
   crawlJobs.push(job);
 
   try {
-    const result = await fetchReviews(platform, store_id || 1, { demo: demo !== false });
+    const result = await fetchReviews(platform, store_id || 1);
     job.status = 'completed';
     job.completed_at = new Date().toISOString();
     job.result = { count: result.count };
@@ -1871,12 +2064,12 @@ app.post('/fetch-reviews', async (req, res) => {
 
 // 전체 플랫폼 리뷰 수집 (일괄)
 app.post('/fetch-all', async (req, res) => {
-  const { store_id, demo } = req.body;
+  const { store_id } = req.body;
   const results = {};
 
   for (const platform of Object.keys(PLATFORMS)) {
     try {
-      results[platform] = await fetchReviews(platform, store_id || 1, { demo: demo !== false });
+      results[platform] = await fetchReviews(platform, store_id || 1);
     } catch (error) {
       results[platform] = { success: false, error: error.message };
     }
@@ -1909,30 +2102,62 @@ app.post('/post-reply', async (req, res) => {
 });
 
 // 세션 상태
-app.get('/sessions', (req, res) => {
+app.get('/sessions', async (req, res) => {
   const requestedPlatform = req.query.platform;
   const requestedStoreId = req.query.store_id ? normalizeStoreId(req.query.store_id) : null;
+  const shouldRestore = req.query.restore === '1' || req.query.restore === 'true';
   const sessions = {};
   for (const [sessionKey, session] of platformSessions) {
     if (requestedPlatform && session.platform !== requestedPlatform) continue;
     if (requestedStoreId && session.storeId !== requestedStoreId) continue;
 
-    sessions[sessionKey] = {
-      name: PLATFORMS[session.platform]?.name || session.platform,
-      platform: session.platform,
-      storeId: session.storeId,
-      loggedIn: session.loggedIn,
-      lastActivity: session.lastActivity ? new Date(session.lastActivity).toISOString() : null
-    };
+    sessions[sessionKey] = serializePlatformSession(session);
   }
 
-  const directSession = requestedPlatform && requestedStoreId
+  let directSession = requestedPlatform && requestedStoreId
     ? sessions[getSessionKey(requestedPlatform, requestedStoreId)] || null
     : null;
+  let message = directSession ? '활성 세션을 찾았습니다.' : '일치하는 활성 세션이 없습니다.';
+  let savedStateAvailable = false;
+
+  if (requestedPlatform && requestedStoreId) {
+    savedStateAvailable = await hasSavedSessionState(requestedPlatform, requestedStoreId).catch(() => false);
+
+    if (!directSession && savedStateAvailable && shouldRestore) {
+      const restored = await restoreSavedPlatformSession(requestedPlatform, requestedStoreId);
+      message = restored.message || message;
+      if (restored.success && restored.session) {
+        const sessionKey = getSessionKey(requestedPlatform, requestedStoreId);
+        sessions[sessionKey] = serializePlatformSession(restored.session);
+        directSession = sessions[sessionKey];
+      }
+    }
+  }
+
   res.json({
     sessions,
     session: directSession,
-    message: directSession ? '활성 세션을 찾았습니다.' : '일치하는 활성 세션이 없습니다.'
+    saved_state_available: savedStateAvailable,
+    message: directSession ? message : message
+  });
+});
+
+app.post('/sessions/clear', async (req, res) => {
+  const { platform, store_id } = req.body || {};
+
+  if (!platform || !PLATFORMS[platform]) {
+    return res.status(400).json({ success: false, error: 'Invalid platform', supported: Object.keys(PLATFORMS) });
+  }
+
+  const normalizedStoreId = normalizeStoreId(store_id);
+  await deleteSavedSessionState(platform, normalizedStoreId).catch(() => {});
+  await closePlatformSession(platform, normalizedStoreId).catch(() => {});
+
+  res.json({
+    success: true,
+    platform,
+    store_id: normalizedStoreId,
+    message: '저장된 플랫폼 세션과 활성 브라우저를 정리했습니다.'
   });
 });
 
@@ -1964,11 +2189,11 @@ app.get('/platforms', (req, res) => {
 
 // 리뷰를 웹앱 DB에 동기화
 app.post('/sync-to-webapp', async (req, res) => {
-  const { platform, store_id, demo } = req.body;
+  const { platform, store_id } = req.body;
   
   try {
     // 1. 리뷰 수집
-    const fetchResult = await fetchReviews(platform || 'baemin', store_id || 1, { demo: demo !== false });
+    const fetchResult = await fetchReviews(platform || 'baemin', store_id || 1);
     
     if (!fetchResult.success || !fetchResult.reviews.length) {
       return res.json({ success: false, message: 'No reviews to sync', ...fetchResult });
@@ -2003,7 +2228,7 @@ app.post('/auto-sync/start', (req, res) => {
     console.log('[Auto-Sync] 자동 리뷰 수집 시작...');
     for (const platform of Object.keys(PLATFORMS)) {
       try {
-        const result = await fetchReviews(platform, 1, { demo: true });
+        const result = await fetchReviews(platform, 1);
         console.log(`[Auto-Sync] ${platform}: ${result.count}건 수집`);
       } catch (e) {
         console.error(`[Auto-Sync] ${platform} 실패:`, e.message);

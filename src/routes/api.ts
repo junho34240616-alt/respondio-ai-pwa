@@ -262,6 +262,45 @@ async function load_platform_connection(db: D1Database, store_id: number, platfo
   ).bind(store_id, platform).first<any>()
 }
 
+async function load_platform_session_state_encrypted(db: D1Database, store_id: number, platform: string) {
+  const record = await db.prepare(
+    'SELECT session_state_encrypted FROM store_platform_connections WHERE store_id = ? AND platform = ?'
+  ).bind(store_id, platform).first<any>()
+
+  return record?.session_state_encrypted ? String(record.session_state_encrypted) : null
+}
+
+async function write_platform_session_state_encrypted(
+  db: D1Database,
+  store_id: number,
+  platform: string,
+  session_state_encrypted: string | null
+) {
+  const existing = await load_platform_connection(db, store_id, platform)
+  if (existing) {
+    await db.prepare(
+      'UPDATE store_platform_connections SET session_state_encrypted = ?, updated_at = datetime("now") WHERE id = ?'
+    ).bind(session_state_encrypted, existing.id).run()
+
+    return true
+  }
+
+  await db.prepare(`
+    INSERT INTO store_platform_connections (
+      store_id, platform, connection_status, platform_store_id, login_email,
+      login_password_encrypted, auth_mode, session_status, session_connected_at,
+      session_last_validated_at, last_error, last_sync_at, session_state_encrypted, updated_at
+    )
+    VALUES (?, ?, 'disconnected', NULL, NULL, NULL, 'credentials', 'inactive', NULL, NULL, NULL, NULL, ?, datetime('now'))
+  `).bind(
+    store_id,
+    platform,
+    session_state_encrypted
+  ).run()
+
+  return true
+}
+
 function sanitize_platform_connection(connection: any) {
   if (!connection) return null
 
@@ -468,6 +507,7 @@ async function get_live_session_state_from_crawler(c: any, platform: string, sto
   const url = new URL(`${get_crawler_base(c)}/sessions`)
   url.searchParams.set('platform', platform)
   url.searchParams.set('store_id', String(store_id))
+  url.searchParams.set('restore', '1')
 
   const response = await fetch(url.toString(), {
     headers: get_crawler_headers(c)
@@ -484,6 +524,24 @@ async function get_live_session_state_from_crawler(c: any, platform: string, sto
       ? '플랫폼 운영 세션이 활성 상태입니다.'
       : result?.message || '현재 활성 운영 세션이 없습니다.'
   }
+}
+
+async function clear_live_platform_session(c: any, platform: string, store_id: number) {
+  const response = await fetch(`${get_crawler_base(c)}/sessions/clear`, {
+    method: 'POST',
+    headers: get_crawler_headers(c, true),
+    body: JSON.stringify({
+      platform,
+      store_id
+    })
+  })
+
+  const { data, text } = await read_json_or_text(response)
+  if (!response.ok || data?.success === false) {
+    throw new Error(data?.error || text || '크롤러 세션 정리에 실패했습니다.')
+  }
+
+  return data
 }
 
 async function start_remote_platform_auth(c: any, platform: string, store_id: number) {
@@ -859,7 +917,7 @@ apiRoutes.use('*', async (c, next) => {
     return
   }
 
-  if (path.endsWith('/crawler/reviews')) {
+  if (path.endsWith('/crawler/reviews') || path.endsWith('/crawler/platform-session-state')) {
     const provided_secret = c.req.header('x-crawler-secret')
     if (!c.env.CRAWLER_SHARED_SECRET || provided_secret === get_crawler_secret(c)) {
       await next()
@@ -2054,6 +2112,10 @@ apiRoutes.post('/platform_connections/:platform/auth-mode', async (c) => {
     return json_error(c, 400, 'invalid_auth_mode', '지원하지 않는 연결 방식입니다.')
   }
 
+  if (auth_mode !== 'direct_session') {
+    await clear_live_platform_session(c, platform, store_id).catch(() => null)
+  }
+
   const connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
     connection_status: auth_mode === 'direct_session' ? 'disconnected' : 'disconnected',
     auth_mode,
@@ -2338,6 +2400,8 @@ apiRoutes.post('/platform_connections/:platform/disconnect', async (c) => {
     return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
   }
 
+  await clear_live_platform_session(c, platform, store_id).catch(() => null)
+
   const connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
     connection_status: 'disconnected',
     login_email: null,
@@ -2423,6 +2487,72 @@ apiRoutes.post('/crawler/reviews', async (c) => {
   })
 })
 
+apiRoutes.get('/crawler/platform-session-state', async (c) => {
+  const store_id = as_number(c.req.query('store_id'))
+  const platform = String(c.req.query('platform') || '')
+
+  if (!store_id || !supported_platforms.has(platform)) {
+    return json_error(c, 400, 'crawler_session_state_invalid', 'store_id와 platform이 필요합니다.')
+  }
+
+  const encrypted = await load_platform_session_state_encrypted(c.env.DB, store_id, platform)
+  if (!encrypted) {
+    return c.json({ success: true, session_state: null })
+  }
+
+  const encryption_key = get_credentials_encryption_key(c)
+  if (!encryption_key) {
+    return json_error(c, 500, 'crawler_session_state_key_missing', 'CREDENTIALS_ENCRYPTION_KEY가 설정되지 않았습니다.')
+  }
+
+  try {
+    const decrypted = await decrypt_secret(encrypted, encryption_key)
+    return c.json({
+      success: true,
+      session_state: JSON.parse(decrypted)
+    })
+  } catch (error: any) {
+    return json_error(c, 500, 'crawler_session_state_read_failed', error.message || '세션 상태 복호화에 실패했습니다.')
+  }
+})
+
+apiRoutes.post('/crawler/platform-session-state', async (c) => {
+  const { store_id, platform, session_state, clear } = await read_json_body<{
+    store_id?: number
+    platform?: string
+    session_state?: unknown
+    clear?: boolean
+  }>(c)
+
+  const normalized_store_id = as_number(store_id)
+  const normalized_platform = String(platform || '')
+  if (!normalized_store_id || !supported_platforms.has(normalized_platform)) {
+    return json_error(c, 400, 'crawler_session_state_invalid', 'store_id와 platform이 필요합니다.')
+  }
+
+  if (clear) {
+    await write_platform_session_state_encrypted(c.env.DB, normalized_store_id, normalized_platform, null)
+    return c.json({ success: true, session_state: null })
+  }
+
+  if (!session_state || typeof session_state !== 'object') {
+    return json_error(c, 400, 'crawler_session_state_invalid_payload', 'session_state 객체가 필요합니다.')
+  }
+
+  const encryption_key = get_credentials_encryption_key(c)
+  if (!encryption_key) {
+    return json_error(c, 500, 'crawler_session_state_key_missing', 'CREDENTIALS_ENCRYPTION_KEY가 설정되지 않았습니다.')
+  }
+
+  try {
+    const encrypted = await encrypt_secret(JSON.stringify(session_state), encryption_key)
+    await write_platform_session_state_encrypted(c.env.DB, normalized_store_id, normalized_platform, encrypted)
+    return c.json({ success: true })
+  } catch (error: any) {
+    return json_error(c, 500, 'crawler_session_state_write_failed', error.message || '세션 상태 저장에 실패했습니다.')
+  }
+})
+
 apiRoutes.get('/crawler/status', async (c) => {
   try {
     const response = await fetch(`${get_crawler_base(c)}/health`, {
@@ -2454,7 +2584,6 @@ apiRoutes.post('/reviews/sync', async (c) => {
     return json_error(c, 400, 'invalid_platform', '지원하는 플랫폼을 선택해주세요.')
   }
 
-  const demo = false
   const results: unknown[] = []
   let fetched = 0
   let inserted = 0
@@ -2462,18 +2591,16 @@ apiRoutes.post('/reviews/sync', async (c) => {
 
   for (const platform of platforms) {
     try {
-      if (!demo) {
-        const login_result = await ensure_live_platform_session(c, store_id, platform)
-        if (!login_result.success) {
-          results.push({ platform, success: false, error: login_result.error || '플랫폼 세션 연결에 실패했습니다.' })
-          continue
-        }
+      const login_result = await ensure_live_platform_session(c, store_id, platform)
+      if (!login_result.success) {
+        results.push({ platform, success: false, error: login_result.error || '플랫폼 세션 연결에 실패했습니다.' })
+        continue
       }
 
       const response = await fetch(`${get_crawler_base(c)}/fetch-reviews`, {
         method: 'POST',
         headers: get_crawler_headers(c, true),
-        body: JSON.stringify({ platform, store_id, demo })
+        body: JSON.stringify({ platform, store_id })
       })
 
       const crawl_result = await response.json() as any
@@ -2492,7 +2619,7 @@ apiRoutes.post('/reviews/sync', async (c) => {
         fetched: as_number(crawl_result.count),
         inserted: ingest_result.inserted_count,
         skipped: ingest_result.skipped_count,
-        mode: crawl_result.mode || (demo ? 'demo' : 'live')
+        mode: crawl_result.mode || 'live'
       })
     } catch (error: any) {
       results.push({ platform, success: false, error: error.message })

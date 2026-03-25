@@ -9,7 +9,7 @@
 - **메인 웹앱/API는 Hono + D1 + Cloudflare Pages/Workers 유지**
 - **크롤러는 Node.js + Playwright 별도 프로세스로 유지**
 - **사용자 이용 경로는 PC/모바일 브라우저에서 웹앱 접속이 기본**
-- **플랫폼 연결은 경쟁업체와 유사한 `서버 자동 로그인 + 서버 수집/등록` 방향으로 고도화**
+- **배민 연결은 `원격 서버 브라우저에서 사용자 직접 로그인 → 세션 저장 → 서버 수집/등록` 흐름으로 전환**
 - **Next.js + Redis + R2 + worker 분리는 장기 확장안**이며, 즉시 마이그레이션 대상이 아님
 - **젠스파크 AI개발자 배포 기준으로는 현재 구조를 고도화하는 편이 더 안전**
 
@@ -104,7 +104,7 @@
 ## 현재 제한사항
 1. **JWT access token + refresh token/httpOnly cookie는 구현됨** - 다만 기기별 세션 관리/강제 로그아웃 UI는 아직 없음
 2. **API 스코프는 사용자/매장 기준으로 정리됨** - 일부 UI 문구와 시드 데이터는 여전히 데모 전제
-3. **플랫폼 연결은 서버 자동화가 기본** - 운영 계정을 연결하면 크롤러가 로그인/리뷰 수집/답변 등록을 수행
+3. **배민 연결은 직접 세션 방식이 기본** - 웹앱 안 원격 브라우저에서 사용자가 1회 로그인하면 크롤러가 저장된 세션으로 리뷰 수집/답변 등록을 수행
 4. **크롤러 URL은 설정 가능** - 프로덕션에서는 `CRAWLER_API_BASE`, `CRAWLER_SHARED_SECRET`, `CREDENTIALS_ENCRYPTION_KEY` 배선이 필요
 5. **PortOne 결제는 선택 기능** - 지금은 `PORTONE_*` 값 없이도 무료 베타 모드로 배포 가능하며, 결제 화면은 베타 안내로 동작
 6. **테스트는 확장됨** - auth/API 스모크와 로컬 Cloudflare+Crawler 브라우저 E2E(`npm run test:e2e`)가 추가됨
@@ -156,6 +156,10 @@ npm run test:e2e
 - **크롤러**: 별도 Node.js 서버(Render/VPS/PM2 등)
 - **추후 필요 시 추가**: R2 for failure artifacts, Redis for queueing
 - **Render 배포 파일 포함**: `render.yaml`, `crawler/Dockerfile`
+
+### Free Operation Note
+- **배민 직접 세션은 크롤러 디스크가 아니라 D1에 암호화 저장**
+- **무료 Render/무료 Cloudflare 조합 유지 기준**: 별도 persistent disk 없이도 크롤러 재시작 후 저장 세션 복원이 가능해야 함
 
 ### Production Deploy Note
 - **로컬 smoke는 통과**: `wrangler pages dev` + D1 migration/seed + crawler 운영 경로 + browser E2E 확인

@@ -2442,12 +2442,18 @@ function platformRemoteAuthPage(platform: string) {
     }
     .remote-auth-hidden-input {
       position: fixed;
-      left: -9999px;
-      top: 0;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
+      left: 1.25rem;
+      bottom: 1.25rem;
+      width: 2px;
+      height: 2px;
+      opacity: 0.01;
       pointer-events: none;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      background: transparent;
+      color: transparent;
+      caret-color: transparent;
     }
     .remote-auth-side-panel {
       position: sticky;
@@ -2605,9 +2611,13 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthPollTimer = null;
     let remoteAuthScreenshotObjectUrl = null;
     let remoteAuthRefreshTimer = null;
+    let remoteAuthRefreshInFlight = null;
     let remoteAuthActionChain = Promise.resolve();
     let remoteAuthComposing = false;
-    let remoteAuthSkipNextInput = false;
+    let remoteAuthTextFlushTimer = null;
+    let remoteAuthTextFlushInFlight = false;
+    let remoteAuthScrollFlushTimer = null;
+    let remoteAuthQueuedScrollDelta = 0;
     let remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
 
     function extractRemoteAuthSnapshot(payload) {
@@ -2676,7 +2686,7 @@ function platformRemoteAuthPage(platform: string) {
       el.classList.toggle('ready', tone === 'ready');
     }
 
-    function scheduleRemoteAuthRefresh(delay = 260) {
+    function scheduleRemoteAuthRefresh(delay = 120) {
       if (remoteAuthRefreshTimer) {
         clearTimeout(remoteAuthRefreshTimer);
       }
@@ -2694,6 +2704,85 @@ function platformRemoteAuthPage(platform: string) {
           showRemoteAuthAlert(error.message, 'error');
         });
       return remoteAuthActionChain;
+    }
+
+    function focusRemoteAuthCaptureInput() {
+      const input = document.getElementById('remote-auth-capture-input');
+      if (!input) return;
+
+      try {
+        input.focus({ preventScroll: true });
+      } catch (error) {
+        input.focus();
+      }
+    }
+
+    function scheduleRemoteAuthTextFlush(delay = 45) {
+      if (remoteAuthTextFlushTimer) {
+        clearTimeout(remoteAuthTextFlushTimer);
+      }
+
+      remoteAuthTextFlushTimer = setTimeout(function() {
+        flushRemoteAuthText().catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      }, Math.max(0, delay));
+    }
+
+    async function flushRemoteAuthText() {
+      const input = document.getElementById('remote-auth-capture-input');
+      if (!input || remoteAuthComposing || remoteAuthTextFlushInFlight) {
+        return;
+      }
+
+      const value = input.value;
+      if (!value) {
+        return;
+      }
+
+      remoteAuthTextFlushInFlight = true;
+      input.value = '';
+
+      try {
+        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 90 });
+        updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
+      } finally {
+        remoteAuthTextFlushInFlight = false;
+        if (input.value) {
+          scheduleRemoteAuthTextFlush(0);
+        }
+      }
+    }
+
+    function normalizeRemoteAuthWheelDelta(event) {
+      const lineHeight = 40;
+      const pageHeight = window.innerHeight || 900;
+      const factor = event.deltaMode === 1 ? lineHeight : event.deltaMode === 2 ? pageHeight : 1;
+      const rawDelta = Number(event.deltaY || 0) * factor;
+      return Math.max(-1400, Math.min(1400, Math.round(rawDelta)));
+    }
+
+    function flushRemoteAuthScroll() {
+      const deltaY = Math.max(-1600, Math.min(1600, Math.round(remoteAuthQueuedScrollDelta)));
+      remoteAuthQueuedScrollDelta = 0;
+      remoteAuthScrollFlushTimer = null;
+
+      if (!deltaY) {
+        return;
+      }
+
+      sendRemoteAuthAction({ action: 'scroll', deltaY: deltaY }, { refresh: 'deferred', delay: 70 }).catch(function(error) {
+        showRemoteAuthAlert(error.message, 'error');
+      });
+    }
+
+    function queueRemoteAuthScroll(deltaY) {
+      remoteAuthQueuedScrollDelta += deltaY;
+      if (remoteAuthScrollFlushTimer) {
+        return;
+      }
+
+      remoteAuthScrollFlushTimer = setTimeout(flushRemoteAuthScroll, 40);
     }
 
     function updateRemoteAuthStatus(snapshot) {
@@ -2742,13 +2831,33 @@ function platformRemoteAuthPage(platform: string) {
 
     async function refreshRemoteAuthStatus() {
       if (!remoteAuthSessionId) return;
-      const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/status');
-      const data = await readJsonResponse(response);
-      if (!response.ok || data.error) {
-        throw new Error(data?.error?.message || '원격 인증 상태를 불러오지 못했습니다.');
+      if (remoteAuthRefreshInFlight) {
+        return remoteAuthRefreshInFlight;
       }
-      updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
-      await refreshRemoteAuthScreenshot();
+
+      remoteAuthRefreshInFlight = (async function() {
+        let screenshotError = null;
+        const screenshotPromise = refreshRemoteAuthScreenshot().catch(function(error) {
+          screenshotError = error;
+        });
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/status');
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          throw new Error(data?.error?.message || '원격 인증 상태를 불러오지 못했습니다.');
+        }
+
+        const snapshot = extractRemoteAuthSnapshot(data);
+        updateRemoteAuthStatus(snapshot);
+        await screenshotPromise;
+
+        if (screenshotError && snapshot?.status !== 'closed') {
+          throw screenshotError;
+        }
+      })().finally(function() {
+        remoteAuthRefreshInFlight = null;
+      });
+
+      return remoteAuthRefreshInFlight;
     }
 
     async function refreshRemoteAuthScreenshot() {
@@ -2789,36 +2898,22 @@ function platformRemoteAuthPage(platform: string) {
         if (!response.ok || data.error) {
           throw new Error(data?.error?.message || '원격 인증 조작에 실패했습니다.');
         }
-        updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
+        const snapshot = extractRemoteAuthSnapshot(data);
+        if (snapshot) {
+          updateRemoteAuthStatus(snapshot);
+        }
         if (options.refresh === 'deferred') {
-          scheduleRemoteAuthRefresh(options.delay || 260);
+          scheduleRemoteAuthRefresh(options.delay || 120);
         } else {
           await refreshRemoteAuthScreenshot();
         }
       });
     }
 
-    async function typeRemoteAuthText(textOverride) {
-      const input = document.getElementById('remote-auth-capture-input');
-      const value = typeof textOverride === 'string' ? textOverride : input.value;
-      if (!value) {
-        updateRemoteAuthFocusPill('입력할 글자를 기다리는 중', '');
-        return;
-      }
-      if (input) {
-        input.value = '';
-      }
-      try {
-        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 150 });
-        updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
-      } catch (error) {
-        showRemoteAuthAlert(error.message, 'error');
-      }
-    }
-
     async function sendRemoteAuthKey(key) {
       try {
-        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 130 });
+        await flushRemoteAuthText();
+        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 90 });
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2920,7 +3015,19 @@ function platformRemoteAuthPage(platform: string) {
     const remoteAuthScreenshotEl = document.getElementById('remote-auth-screenshot');
     const remoteAuthCaptureInputEl = document.getElementById('remote-auth-capture-input');
 
+    remoteAuthScreenshotEl.addEventListener('pointerdown', function(event) {
+      event.preventDefault();
+      if (!remoteAuthSnapshot?.viewport) {
+        return;
+      }
+
+      focusRemoteAuthCaptureInput();
+      updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
+      window.requestAnimationFrame(focusRemoteAuthCaptureInput);
+    });
+
     remoteAuthScreenshotEl.addEventListener('click', async function(event) {
+      event.preventDefault();
       if (!remoteAuthSnapshot?.viewport) {
         showRemoteAuthAlert('원격 브라우저 해상도가 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.', 'info');
         return;
@@ -2932,10 +3039,9 @@ function platformRemoteAuthPage(platform: string) {
       const y = Math.max(1, Math.round(relativeY * remoteAuthSnapshot.viewport.height));
       try {
         updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
-        if (remoteAuthCaptureInputEl) {
-          remoteAuthCaptureInputEl.focus();
-        }
-        await sendRemoteAuthAction({ action: 'click', x: x, y: y }, { refresh: 'deferred', delay: 120 });
+        focusRemoteAuthCaptureInput();
+        await sendRemoteAuthAction({ action: 'click', x: x, y: y }, { refresh: 'deferred', delay: 90 });
+        window.requestAnimationFrame(focusRemoteAuthCaptureInput);
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -2943,8 +3049,7 @@ function platformRemoteAuthPage(platform: string) {
 
     remoteAuthScreenshotEl.addEventListener('wheel', function(event) {
       event.preventDefault();
-      const deltaY = event.deltaY > 0 ? 480 : -480;
-      sendRemoteAuthAction({ action: 'scroll', deltaY: deltaY }, { refresh: 'deferred', delay: 120 });
+      queueRemoteAuthScroll(normalizeRemoteAuthWheelDelta(event));
     }, { passive: false });
 
     remoteAuthCaptureInputEl.addEventListener('compositionstart', function() {
@@ -2954,25 +3059,14 @@ function platformRemoteAuthPage(platform: string) {
 
     remoteAuthCaptureInputEl.addEventListener('compositionend', function() {
       remoteAuthComposing = false;
-      const value = remoteAuthCaptureInputEl.value;
-      if (value) {
-        typeRemoteAuthText(value);
-      }
+      scheduleRemoteAuthTextFlush(0);
     });
 
     remoteAuthCaptureInputEl.addEventListener('input', function() {
-      if (remoteAuthSkipNextInput) {
-        remoteAuthSkipNextInput = false;
-        return;
-      }
       if (remoteAuthComposing) {
         return;
       }
-      const value = remoteAuthCaptureInputEl.value;
-      if (!value) {
-        return;
-      }
-      typeRemoteAuthText(value);
+      scheduleRemoteAuthTextFlush(40);
     });
 
     remoteAuthCaptureInputEl.addEventListener('paste', function(event) {
@@ -2981,9 +3075,8 @@ function platformRemoteAuthPage(platform: string) {
         return;
       }
       event.preventDefault();
-      remoteAuthSkipNextInput = true;
-      remoteAuthCaptureInputEl.value = '';
-      typeRemoteAuthText(pastedText);
+      remoteAuthCaptureInputEl.value += pastedText;
+      scheduleRemoteAuthTextFlush(0);
     });
 
     remoteAuthCaptureInputEl.addEventListener('keydown', function(event) {
@@ -3745,7 +3838,7 @@ function adminDashboardPage() {
       try {
         const res = await apiFetch('/api/v1/reviews/sync', {
           method: 'POST',
-          body: JSON.stringify({ platform: 'baemin', demo: true })
+          body: JSON.stringify({ platform: 'baemin' })
         });
         const data = await res.json();
         if (data.success) {
