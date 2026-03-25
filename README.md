@@ -5,6 +5,14 @@
 - **Goal**: 배달 플랫폼(배민/쿠팡이츠/요기요) 리뷰를 AI로 자동 관리하는 SaaS
 - **Tech Stack**: Hono + TypeScript + Cloudflare Pages + Playwright + Tailwind CSS
 
+## Current Architecture Direction
+- **메인 웹앱/API는 Hono + D1 + Cloudflare Pages/Workers 유지**
+- **크롤러는 Node.js + Playwright 별도 프로세스로 유지**
+- **사용자 이용 경로는 PC/모바일 브라우저에서 웹앱 접속이 기본**
+- **배민 연결은 `원격 서버 브라우저에서 사용자 직접 로그인 → 세션 저장 → 서버 수집/등록` 흐름으로 전환**
+- **Next.js + Redis + R2 + worker 분리는 장기 확장안**이며, 즉시 마이그레이션 대상이 아님
+- **젠스파크 AI개발자 배포 기준으로는 현재 구조를 고도화하는 편이 더 안전**
+
 ## URLs
 - **웹앱**: https://3000-ir517r00gc4sr4252u90m-82b888ba.sandbox.novita.ai
 - **크롤러 API**: https://4000-ir517r00gc4sr4252u90m-82b888ba.sandbox.novita.ai
@@ -19,7 +27,7 @@
 | `/dashboard` | 메인 대시보드 (KPI 6개, 최근 리뷰, 메뉴 평판 차트, 충성 고객, 트렌드) |
 | `/reviews` | 리뷰 관리 (필터, AI 답변 생성/승인, 리뷰 수집) |
 | `/customers` | 고객 분석 (단골/재방문 고객 목록) |
-| `/billing` | 구독/결제 (요금제 비교, 결제 내역, 결제 수단) |
+| `/billing` | 무료 베타 운영 안내 / 추후 구독·결제 전환 화면 |
 | `/settings` | 설정 (매장 정보, 답변 스타일, 자동 응답) |
 
 ### 관리자 페이지
@@ -36,12 +44,17 @@
 |-----------|--------|------|
 | `/auth/login` | POST | 로그인 |
 | `/auth/signup` | POST | 회원가입 |
+| `/auth/refresh` | POST | refresh token으로 access token 재발급 |
+| `/auth/logout` | POST | 로그아웃 및 세션 폐기 |
+| `/auth/me` | GET | 현재 로그인 사용자 조회 |
+| `/health/public` | GET | 공개 상태 점검 (DB / crawler / billing mode) |
 | `/reviews` | GET | 리뷰 목록 (필터: status, platform, sentiment) |
 | `/reviews/:id/generate` | POST | AI 답변 생성 (GPT/템플릿) |
 | `/reviews/:id/analyze` | POST | 감정 분석 |
 | `/reviews/batch-generate` | POST | 미답변 리뷰 일괄 AI 생성 |
 | `/reviews/batch-analyze` | POST | 일괄 감정 분석 |
 | `/reviews/approve` | POST | 답변 승인 |
+| `/reviews/:id/post` | POST | 승인된 답변 수동 등록 |
 | `/reviews/:id/reply` | PATCH | 답변 수정 |
 | `/reviews/sync` | POST | 크롤러를 통한 리뷰 수집 |
 | `/dashboard/summary` | GET | 대시보드 KPI |
@@ -89,14 +102,30 @@
 - API 오류 시 템플릿 폴백
 
 ## 현재 제한사항
-1. **GenSpark LLM Proxy API 키 만료** - API Keys 탭에서 키 갱신 후 Inject 필요. 갱신 전까지 template_fallback으로 동작
-2. **크롤링 데모 모드** - 현재 데모 데이터로 시뮬레이션. 실제 플랫폼 크리덴셜 입력 시 실제 크롤링 가능
-3. **PWA** - manifest.json, service worker 구성 완료. HTTPS 환경에서 설치 가능
+1. **JWT access token + refresh token/httpOnly cookie는 구현됨** - 다만 기기별 세션 관리/강제 로그아웃 UI는 아직 없음
+2. **API 스코프는 사용자/매장 기준으로 정리됨** - 일부 UI 문구와 시드 데이터는 여전히 데모 전제
+3. **배민 연결은 직접 세션 방식이 기본** - 웹앱 안 원격 브라우저에서 사용자가 1회 로그인하면 크롤러가 저장된 세션으로 리뷰 수집/답변 등록을 수행
+4. **크롤러 URL은 설정 가능** - 프로덕션에서는 `CRAWLER_API_BASE`, `CRAWLER_SHARED_SECRET`, `CREDENTIALS_ENCRYPTION_KEY` 배선이 필요
+5. **PortOne 결제는 선택 기능** - 지금은 `PORTONE_*` 값 없이도 무료 베타 모드로 배포 가능하며, 결제 화면은 베타 안내로 동작
+6. **테스트는 확장됨** - auth/API 스모크와 로컬 Cloudflare+Crawler 브라우저 E2E(`npm run test:e2e`)가 추가됨
+7. **PWA는 부분 구현** - 서비스워커 등록은 추가됐지만 설치/오프라인 동작 검증은 아직 필요
+
+## 현재 집중 범위
+- 웹앱 메인 UX 정리
+- 플랫폼 운영 계정 연동 안정화
+- 서버 자동 리뷰 수집/답변 등록 성공률 개선
+- 배민/쿠팡이츠/요기요 직접 인증 세션 흐름 안정화
+
+## Required Environment Variables
+- **Cloudflare Pages / Workers secrets**: `OPENAI_API_KEY`, `JWT_SECRET`, `CRAWLER_SHARED_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`
+- **Cloudflare Pages / Workers vars**: `OPENAI_BASE_URL`, `CRAWLER_API_BASE`, `APP_BASE_URL`
+- **선택 결제값**: `PORTONE_STORE_ID`, `PORTONE_CHANNEL_KEY`, `PORTONE_API_SECRET`, `PORTONE_WEBHOOK_SECRET`
+- **Crawler server vars**: `WEBAPP_API`, `CRAWLER_SHARED_SECRET`, `CRAWLER_PORT`, `CRAWLER_TEST_MODE`
 
 ## 서버 실행
 ```bash
 # 웹앱 (port 3000)
-cd /home/user/webapp && npm run build && pm2 start ecosystem.config.cjs
+cd /Users/junho/Documents/Respondio && npm run build && pm2 start ecosystem.config.cjs
 
 # 크롤러 (port 4000)
 pm2 start crawler/ecosystem.config.cjs
@@ -105,7 +134,34 @@ pm2 start crawler/ecosystem.config.cjs
 pm2 list
 ```
 
+## 테스트
+```bash
+# auth + API smoke
+npm test
+
+# production readiness
+npm run doctor:prod
+
+# 로컬 Cloudflare Pages + D1 + crawler + browser E2E
+npm run test:e2e
+```
+
 ## Deployment
 - **Platform**: Cloudflare Pages
 - **Status**: Sandbox에서 실행 중
-- **Last Updated**: 2026-03-10
+- **Last Updated**: 2026-03-11
+
+### Recommended Deployment Split
+- **웹앱/API**: Cloudflare Pages + Workers + D1
+- **크롤러**: 별도 Node.js 서버(Render/VPS/PM2 등)
+- **추후 필요 시 추가**: R2 for failure artifacts, Redis for queueing
+- **Render 배포 파일 포함**: `render.yaml`, `crawler/Dockerfile`
+
+### Free Operation Note
+- **배민 직접 세션은 크롤러 디스크가 아니라 D1에 암호화 저장**
+- **무료 Render/무료 Cloudflare 조합 유지 기준**: 별도 persistent disk 없이도 크롤러 재시작 후 저장 세션 복원이 가능해야 함
+
+### Production Deploy Note
+- **로컬 smoke는 통과**: `wrangler pages dev` + D1 migration/seed + crawler 운영 경로 + browser E2E 확인
+- **원격 배포는 현재 보류**: 이 환경에서 `wrangler whoami` 결과가 `You are not authenticated. Please run wrangler login.` 이므로 실제 Cloudflare 배포는 인증 후 진행 가능
+- **사용자 가이드북**: [docs/PRODUCTION_SETUP_GUIDE.md](/Users/junho/Documents/Respondio%20/docs/PRODUCTION_SETUP_GUIDE.md)

@@ -1,14 +1,22 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "respondio",
+  "name": "respondio-ai-pwa",
   "compatibility_date": "2026-03-10",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": ["nodejs_compat"],
+  // Set via Cloudflare Pages environment variables or `wrangler secret put`:
+  // OPENAI_API_KEY, JWT_SECRET, CRAWLER_SHARED_SECRET, CREDENTIALS_ENCRYPTION_KEY,
+  // PORTONE_API_SECRET, PORTONE_WEBHOOK_SECRET
+  // Also configure plain vars for OPENAI_BASE_URL, CRAWLER_API_BASE, APP_BASE_URL,
+  // PORTONE_STORE_ID, PORTONE_CHANNEL_KEY per environment.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "respondio-production",
-      "database_id": "local-dev-placeholder"
+      // Replace with the real Cloudflare D1 database UUID before deploying.
+      "database_id": "308805fa-a356-4626-ad34-c2a0dc1debac",
+      // Used only for local Pages development.
+      "preview_database_id": "DB"
     }
   ]
 }

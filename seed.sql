@@ -22,19 +22,19 @@ INSERT OR IGNORE INTO store_platform_connections (store_id, platform, connection
   (1, 'yogiyo', 'connected', 'YG-11111');
 
 -- 테스트 리뷰 데이터
-INSERT OR IGNORE INTO reviews (store_id, platform, customer_name, rating, review_text, menu_items, sentiment, status, is_repeat_customer, customer_type, created_at) VALUES
-  (1, 'baemin', '김민수', 5.0, '치킨이 진짜 맛있어요! 배달도 빠르고 감자튀김도 바삭해요. 항상 만족합니다.', '["양념치킨","감자튀김"]', 'positive', 'posted', 1, 'loyal', datetime('now', '-2 hours')),
-  (1, 'yogiyo', '이영희', 4.0, '피자가 조금 식어서 왔어요. 그래도 맛은 괜찮았습니다.', '["페퍼로니 피자","콜라 1.25L"]', 'neutral', 'generated', 0, 'new', datetime('now', '-4 hours')),
-  (1, 'coupang_eats', '박지훈', 5.0, '항상 시켜 먹는 집이에요. 오늘도 맛있게 잘 먹었어요!', '["제육볶음","김치찌개"]', 'positive', 'approved', 1, 'loyal', datetime('now', '-6 hours')),
-  (1, 'baemin', '최수진', 3.0, '음식이 너무 늦게 왔어요. 가격에 비해 양도 적어요.', '["불고기 덮밥"]', 'negative', 'pending', 0, 'new', datetime('now', '-8 hours')),
-  (1, 'baemin', '정유진', 5.0, '여기 치킨은 언제 먹어도 맛있어요! 소스도 맛있고 양도 충분해요.', '["후라이드치킨","양념소스"]', 'positive', 'posted', 1, 'repeat', datetime('now', '-1 day')),
-  (1, 'coupang_eats', '한민지', 4.0, '배달은 빨랐는데 국물이 좀 쏟아져 왔어요. 맛은 좋아요.', '["김치찌개","공기밥"]', 'neutral', 'pending', 0, 'new', datetime('now', '-1 day')),
-  (1, 'yogiyo', '오세훈', 5.0, '사장님이 서비스도 넣어주시고 감동이에요. 단골될게요!', '["떡볶이","순대","튀김"]', 'positive', 'posted', 0, 'new', datetime('now', '-2 days')),
-  (1, 'baemin', '이원지', 4.0, '음식이 너무 늦게 왔어요. 가성비는 괜찮습니다.', '["비빔밥","된장찌개"]', 'negative', 'pending', 0, 'new', datetime('now', '-3 hours')),
-  (1, 'baemin', '박형준', 5.0, '항상 여기서 주문해요! 최고에요~', '["간장치킨","맥주"]', 'positive', 'posted', 1, 'loyal', datetime('now', '-2 days')),
-  (1, 'coupang_eats', '김태영', 4.5, '맛있게 잘 먹었습니다. 다음에도 주문할게요.', '["돈까스","우동"]', 'positive', 'generated', 1, 'repeat', datetime('now', '-3 days')),
-  (1, 'yogiyo', '윤서연', 2.0, '기대보다 별로였어요. 양도 적고 맛도 그냥 그래요.', '["짜장면"]', 'negative', 'pending', 0, 'new', datetime('now', '-4 days')),
-  (1, 'baemin', '장현우', 5.0, '매번 주문하는데 한번도 실망한 적이 없어요!', '["양념치킨","치즈볼"]', 'positive', 'posted', 1, 'loyal', datetime('now', '-5 days'));
+INSERT OR IGNORE INTO reviews (store_id, platform, platform_review_id, customer_name, rating, review_text, menu_items, sentiment, status, is_repeat_customer, customer_type, created_at) VALUES
+  (1, 'baemin', 'baemin-seed-001', '김민수', 5.0, '치킨이 진짜 맛있어요! 배달도 빠르고 감자튀김도 바삭해요. 항상 만족합니다.', '["양념치킨","감자튀김"]', 'positive', 'posted', 1, 'loyal', datetime('now', '-2 hours')),
+  (1, 'yogiyo', 'yogiyo-seed-002', '이영희', 4.0, '피자가 조금 식어서 왔어요. 그래도 맛은 괜찮았습니다.', '["페퍼로니 피자","콜라 1.25L"]', 'neutral', 'generated', 0, 'new', datetime('now', '-4 hours')),
+  (1, 'coupang_eats', 'coupang-seed-003', '박지훈', 5.0, '항상 시켜 먹는 집이에요. 오늘도 맛있게 잘 먹었어요!', '["제육볶음","김치찌개"]', 'positive', 'approved', 1, 'loyal', datetime('now', '-6 hours')),
+  (1, 'baemin', 'baemin-seed-004', '최수진', 3.0, '음식이 너무 늦게 왔어요. 가격에 비해 양도 적어요.', '["불고기 덮밥"]', 'negative', 'pending', 0, 'new', datetime('now', '-8 hours')),
+  (1, 'baemin', 'baemin-seed-005', '정유진', 5.0, '여기 치킨은 언제 먹어도 맛있어요! 소스도 맛있고 양도 충분해요.', '["후라이드치킨","양념소스"]', 'positive', 'posted', 1, 'repeat', datetime('now', '-1 day')),
+  (1, 'coupang_eats', 'coupang-seed-006', '한민지', 4.0, '배달은 빨랐는데 국물이 좀 쏟아져 왔어요. 맛은 좋아요.', '["김치찌개","공기밥"]', 'neutral', 'pending', 0, 'new', datetime('now', '-1 day')),
+  (1, 'yogiyo', 'yogiyo-seed-007', '오세훈', 5.0, '사장님이 서비스도 넣어주시고 감동이에요. 단골될게요!', '["떡볶이","순대","튀김"]', 'positive', 'posted', 0, 'new', datetime('now', '-2 days')),
+  (1, 'baemin', 'baemin-seed-008', '이원지', 4.0, '음식이 너무 늦게 왔어요. 가성비는 괜찮습니다.', '["비빔밥","된장찌개"]', 'negative', 'pending', 0, 'new', datetime('now', '-3 hours')),
+  (1, 'baemin', 'baemin-seed-009', '박형준', 5.0, '항상 여기서 주문해요! 최고에요~', '["간장치킨","맥주"]', 'positive', 'posted', 1, 'loyal', datetime('now', '-2 days')),
+  (1, 'coupang_eats', 'coupang-seed-010', '김태영', 4.5, '맛있게 잘 먹었습니다. 다음에도 주문할게요.', '["돈까스","우동"]', 'positive', 'generated', 1, 'repeat', datetime('now', '-3 days')),
+  (1, 'yogiyo', 'yogiyo-seed-011', '윤서연', 2.0, '기대보다 별로였어요. 양도 적고 맛도 그냥 그래요.', '["짜장면"]', 'negative', 'pending', 0, 'new', datetime('now', '-4 days')),
+  (1, 'baemin', 'baemin-seed-012', '장현우', 5.0, '매번 주문하는데 한번도 실망한 적이 없어요!', '["양념치킨","치즈볼"]', 'positive', 'posted', 1, 'loyal', datetime('now', '-5 days'));
 
 -- AI 답변 후보 데이터
 INSERT OR IGNORE INTO reply_candidates (review_id, reply_text, style_type, quality_score, is_selected) VALUES

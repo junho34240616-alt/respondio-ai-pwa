@@ -6,3 +6,8 @@ dist/
 .pm2/
 pids/
 crawler/node_modules/
+.DS_Store
+Respondio-github-upload*.zip
+mobile/react-native-shell/node_modules/
+mobile/react-native-shell/.expo/
+mobile/react-native-shell/dist-export/

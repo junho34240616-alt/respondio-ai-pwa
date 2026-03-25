@@ -3,11 +3,12 @@ module.exports = {
     {
       name: 'respondio-crawler',
       script: 'index.js',
-      cwd: '/home/user/webapp/crawler',
+      cwd: __dirname,
       env: {
         NODE_ENV: 'development',
         CRAWLER_PORT: 4000,
-        WEBAPP_API: 'http://localhost:3000/api/v1'
+        WEBAPP_API: 'http://localhost:3000/api/v1',
+        CRAWLER_SHARED_SECRET: process.env.CRAWLER_SHARED_SECRET || ''
       },
       watch: false,
       instances: 1,

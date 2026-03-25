@@ -1,11 +1,25 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { apiRoutes } from './routes/api'
+import { apiRoutes } from './routes/api.ts'
 
 type Bindings = {
   DB: D1Database
   OPENAI_API_KEY: string
   OPENAI_BASE_URL: string
+  JWT_SECRET: string
+  CRAWLER_API_BASE: string
+  CRAWLER_SHARED_SECRET: string
+  CREDENTIALS_ENCRYPTION_KEY: string
+  PORTONE_API_SECRET: string
+  PORTONE_STORE_ID: string
+  PORTONE_CHANNEL_KEY: string
+  PORTONE_WEBHOOK_SECRET: string
+  APP_BASE_URL: string
+}
+
+type PageOptions = {
+  billingEnabled: boolean
+  appShell?: boolean
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -15,18 +29,34 @@ app.use('/api/*', cors())
 // API routes
 app.route('/api/v1', apiRoutes)
 
+function isBillingEnabled(env: Partial<Bindings>) {
+  return !!(env.PORTONE_STORE_ID && env.PORTONE_CHANNEL_KEY && env.PORTONE_API_SECRET)
+}
+
+function getPageOptions(env: Partial<Bindings>, overrides: Partial<PageOptions> = {}): PageOptions {
+  return {
+    billingEnabled: isBillingEnabled(env),
+    appShell: false,
+    ...overrides
+  }
+}
+
 // ============ LANDING PAGE ============
 app.get('/', (c) => {
-  return c.html(landingPage())
+  return c.html(landingPage(getPageOptions(c.env)))
 })
 
 // ============ USER PAGES ============
-app.get('/login', (c) => c.html(loginPage()))
-app.get('/dashboard', (c) => c.html(dashboardPage()))
-app.get('/reviews', (c) => c.html(reviewsPage()))
-app.get('/billing', (c) => c.html(billingPage()))
-app.get('/settings', (c) => c.html(settingsPage()))
-app.get('/customers', (c) => c.html(customersPage()))
+app.get('/login', (c) => c.html(loginPage('login')))
+app.get('/signup', (c) => c.html(loginPage('signup')))
+app.get('/dashboard', (c) => c.html(dashboardPage(getPageOptions(c.env))))
+app.get('/reviews', (c) => c.html(reviewsPage(getPageOptions(c.env))))
+app.get('/billing', (c) => c.html(billingPage(getPageOptions(c.env))))
+app.get('/settings', (c) => c.html(settingsPage(getPageOptions(c.env))))
+app.get('/platform-auth/:platform', (c) => c.html(platformRemoteAuthPage(c.req.param('platform'))))
+app.get('/customers', (c) => c.html(customersPage(getPageOptions(c.env))))
+app.get('/mobile/session-center', (c) => c.html(mobileSessionCenterPage(c.req.query('app_shell') === '1')))
+app.get('/mobile/app-shell', (c) => c.html(mobileAppShellPage()))
 
 // ============ ADMIN PAGES ============
 app.get('/admin', (c) => c.html(adminDashboardPage()))
@@ -90,6 +120,209 @@ function baseHead(title: string, extraHead = '') {
     .card-hover { transition: all 0.2s ease; }
     .card-hover:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.1); }
   </style>
+  <script>
+    let authRefreshPromise = null;
+
+    function getAuthSession() {
+      try {
+        return JSON.parse(localStorage.getItem('respondio_auth') || 'null');
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function getCurrentUser() {
+      const session = getAuthSession();
+      return session?.user || null;
+    }
+
+    function saveAuthSession(payload) {
+      const session = {
+        access_token: payload?.access_token || '',
+        user: payload?.user || null
+      };
+      localStorage.setItem('respondio_auth', JSON.stringify(session));
+      if (session.user) {
+        localStorage.setItem('respondio_user', JSON.stringify(session.user));
+      }
+    }
+
+    function clearAuthSession() {
+      localStorage.removeItem('respondio_auth');
+      localStorage.removeItem('respondio_user');
+    }
+
+    function isAdminUser(user) {
+      return user && (user.role === 'admin' || user.role === 'super_admin');
+    }
+
+    function resolveSafeNextPath(candidate) {
+      if (!candidate || typeof candidate !== 'string') {
+        return null;
+      }
+
+      if (!candidate.startsWith('/')) {
+        return null;
+      }
+
+      if (candidate.startsWith('//')) {
+        return null;
+      }
+
+      return candidate;
+    }
+
+    function buildLoginRedirectUrl(nextPath) {
+      const loginUrl = new URL('/login', window.location.origin);
+      const safeNext = resolveSafeNextPath(nextPath);
+      if (safeNext) {
+        loginUrl.searchParams.set('next', safeNext);
+      }
+      return loginUrl.toString();
+    }
+
+    function ensureAuthenticated(requiredRole) {
+      const session = getAuthSession();
+      if (!session?.access_token || !session?.user) {
+        const currentPath = window.location.pathname + window.location.search + window.location.hash;
+        refreshAuthSession().then(function(restored) {
+          if (restored) {
+            window.location.reload();
+            return;
+          }
+
+          if (window.location.pathname !== '/login') {
+            window.location.href = buildLoginRedirectUrl(currentPath);
+          }
+        });
+        return false;
+      }
+
+      if (requiredRole === 'admin' && !isAdminUser(session.user)) {
+        window.location.href = '/dashboard';
+        return false;
+      }
+
+      return true;
+    }
+
+    async function refreshAuthSession() {
+      if (authRefreshPromise) {
+        return authRefreshPromise;
+      }
+
+      authRefreshPromise = fetch('/api/v1/auth/refresh', { method: 'POST' })
+        .then(async function(response) {
+          const data = await response.json().catch(function() { return {}; });
+          if (!response.ok || !data?.access_token || !data?.user) {
+            clearAuthSession();
+            return false;
+          }
+
+          saveAuthSession(data);
+          return true;
+        })
+        .catch(function() {
+          clearAuthSession();
+          return false;
+        })
+        .finally(function() {
+          authRefreshPromise = null;
+        });
+
+      return authRefreshPromise;
+    }
+
+    async function apiFetch(url, options) {
+      const session = getAuthSession();
+      const requestOptions = Object.assign({}, options || {});
+      const retriedAfterRefresh = !!requestOptions._retriedAfterRefresh;
+      delete requestOptions._retriedAfterRefresh;
+      const headers = Object.assign({}, requestOptions.headers || {});
+
+      if (session?.access_token) {
+        headers.Authorization = 'Bearer ' + session.access_token;
+      }
+
+      if (requestOptions.body && !(requestOptions.body instanceof FormData) && !headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+      }
+
+      const response = await fetch(url, Object.assign({}, requestOptions, { headers }));
+      if (response.status === 401 && !retriedAfterRefresh) {
+        const refreshed = await refreshAuthSession();
+        if (refreshed) {
+          return apiFetch(url, Object.assign({}, requestOptions, { _retriedAfterRefresh: true }));
+        }
+      }
+
+      if (response.status === 401) {
+        clearAuthSession();
+        if (window.location.pathname !== '/login') {
+          const currentPath = window.location.pathname + window.location.search + window.location.hash;
+          window.location.href = buildLoginRedirectUrl(currentPath);
+        }
+      }
+
+      return response;
+    }
+
+    async function readJsonResponse(response) {
+      const text = await response.text();
+      if (!text) {
+        return {
+          error: {
+            message: '서버가 빈 응답을 반환했습니다. CRAWLER_API_BASE 또는 터널 상태를 확인해주세요.'
+          }
+        };
+      }
+
+      try {
+        return JSON.parse(text);
+      } catch (error) {
+        const compact = text.replace(/\s+/g, ' ').trim();
+        let message = '서버 응답을 해석하지 못했습니다: ' + compact.slice(0, 180);
+
+        if (/error code:\s*524/i.test(text) || /<title>\s*524/i.test(text)) {
+          message = '원격 브라우저 준비가 오래 걸려 시간 초과가 발생했습니다. 잠시 후 다시 시도하면 새 세션으로 빠르게 다시 연결됩니다.';
+        } else if (/error code:\s*502/i.test(text) || /<title>\s*502/i.test(text)) {
+          message = '원격 인증 프록시 연결이 일시적으로 불안정합니다. 잠시 후 다시 시도해주세요.';
+        } else if (/error code:\s*503/i.test(text) || /<title>\s*503/i.test(text)) {
+          message = '크롤러 서버가 잠시 응답하지 않고 있습니다. 잠시 후 다시 시도해주세요.';
+        }
+
+        return {
+          error: {
+            message: message
+          }
+        };
+      }
+    }
+
+    async function logout() {
+      try {
+        await fetch('/api/v1/auth/logout', { method: 'POST' });
+      } catch (e) {}
+      clearAuthSession();
+      window.location.href = '/login';
+    }
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          return Promise.all(registrations.map(function(registration) {
+            return registration.unregister();
+          }));
+        }).then(function() {
+          return caches.keys().then(function(keys) {
+            return Promise.all(keys.map(function(key) {
+              return caches.delete(key);
+            }));
+          });
+        }).catch(function() {});
+      });
+    }
+  </script>
   ${extraHead}
 </head>`
 }
@@ -97,7 +330,74 @@ function baseHead(title: string, extraHead = '') {
 // ============================================================
 //  LANDING PAGE
 // ============================================================
-function landingPage() {
+function landingPage(options: PageOptions) {
+  const heroBadge = options.billingEnabled ? 'AI 기반 리뷰 자동답변 SaaS' : '무료 베타 운영 중'
+  const heroDescription = options.billingEnabled
+    ? '배달 리뷰를 자동으로 목소리에 맞는 답변 작성,<br>시간을 아끼고 고객 만족을 챙기세요!'
+    : '지금은 무료 베타로 핵심 자동화 기능을 먼저 검증하고 있습니다.<br>결제 없이 리뷰 수집과 AI 답변 흐름을 바로 써볼 수 있어요.'
+  const heroChecks = options.billingEnabled
+    ? ['신용카드 불필요', '14일 무료 체험', '즉시 시작']
+    : ['무료 베타 운영', '플랫폼 연결부터 시작', '결제는 추후 오픈']
+  const pricingMarkup = options.billingEnabled
+    ? [
+        { name: '베이직', price: '29,000', features: ['리뷰 응답 300건/월', '기본 분석 리포트', '1개 플랫폼 연결'], popular: false },
+        { name: '프로', price: '59,000', features: ['리뷰 응답 800건/월', '고급 분석 대시보드', '3개 플랫폼 연결', '말투 학습 기능', '단골 고객 분석'], popular: true },
+        { name: '프리미엄', price: '99,000', features: ['리뷰 응답 2,000건/월', '프리미엄 분석', '무제한 플랫폼', '우선 지원', 'API 연동'], popular: false }
+      ].map((plan) => `
+          <div class="relative bg-white rounded-2xl border-2 ${plan.popular ? 'border-brand-500 shadow-xl shadow-brand-500/10' : 'border-gray-100'} p-8 card-hover">
+            ${plan.popular ? '<div class="absolute -top-4 left-1/2 -translate-x-1/2 bg-brand-500 text-white text-xs font-bold px-4 py-1 rounded-full">가장 인기</div>' : ''}
+            <h3 class="text-xl font-bold text-gray-900 mb-2">${plan.name}</h3>
+            <div class="mb-6">
+              <span class="text-4xl font-extrabold text-gray-900">₩${plan.price}</span>
+              <span class="text-gray-400">/월</span>
+            </div>
+            <ul class="space-y-3 mb-8">
+              ${plan.features.map((feature) => `<li class="flex items-center gap-2 text-sm text-gray-600"><i class="fas fa-check text-brand-500 text-xs"></i>${feature}</li>`).join('')}
+            </ul>
+            <a href="/login" class="block text-center py-3 rounded-xl font-semibold transition ${plan.popular ? 'bg-brand-500 text-white hover:bg-brand-600 shadow-lg shadow-brand-500/30' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}">
+              지금 시작하기
+            </a>
+          </div>
+        `).join('')
+    : [
+        {
+          title: '무료 베타',
+          icon: 'fa-flask',
+          tone: 'brand',
+          body: '회원가입 후 바로 플랫폼 연결, 리뷰 동기화, AI 답변 생성까지 무료로 테스트할 수 있습니다.'
+        },
+        {
+          title: '관리자 온보딩',
+          icon: 'fa-handshake',
+          tone: 'blue',
+          body: '결제 없이 실제 매장 운영 흐름을 먼저 검증하고, 필요한 설정은 관리자 가이드로 맞춰갑니다.'
+        },
+        {
+          title: '추후 유료 전환',
+          icon: 'fa-credit-card',
+          tone: 'green',
+          body: 'PortOne 결제는 정식 출시 시점에 연결합니다. 지금은 핵심 기능 안정화와 베타 피드백 수집이 우선입니다.'
+        }
+      ].map((item) => `
+          <div class="bg-white border border-gray-100 rounded-2xl p-8 card-hover">
+            <div class="w-14 h-14 bg-${item.tone}-100 rounded-2xl flex items-center justify-center mb-5">
+              <i class="fas ${item.icon} text-${item.tone === 'brand' ? 'brand' : item.tone}-500 text-xl"></i>
+            </div>
+            <h3 class="text-xl font-bold text-gray-900 mb-3">${item.title}</h3>
+            <p class="text-sm text-gray-600 leading-relaxed mb-6">${item.body}</p>
+            <a href="/login" class="inline-flex items-center gap-2 text-brand-600 font-semibold text-sm hover:text-brand-700">
+              무료 베타 시작하기 <i class="fas fa-arrow-right text-xs"></i>
+            </a>
+          </div>
+        `).join('')
+  const faqPricing = options.billingEnabled
+    ? { q: '무료 체험 기간이 있나요?', a: '네, 14일 무료 체험을 제공합니다. 신용카드 정보 없이 바로 시작하실 수 있어요.' }
+    : { q: '지금 바로 결제해야 하나요?', a: '아니요. 현재는 무료 베타 운영 중이라 결제 없이 핵심 기능을 먼저 써볼 수 있습니다. 결제는 PortOne 연동이 준비된 뒤 정식 오픈할 예정입니다.' }
+  const ctaSubcopy = options.billingEnabled
+    ? '14일 무료 체험 · 신용카드 불필요 · 즉시 시작'
+    : '무료 베타 운영 · 결제는 추후 오픈 · 즉시 테스트 가능'
+  const primaryCta = options.billingEnabled ? '무료로 시작하기' : '무료 베타 시작하기'
+
   return `${baseHead('쉽고 빠르게 리뷰 관리')}
 <body class="bg-white">
   <!-- Nav -->
@@ -112,12 +412,12 @@ function landingPage() {
       <div class="hidden md:flex items-center gap-8 text-sm text-gray-600">
         <a href="#features" class="hover:text-brand-500">기능</a>
         <a href="#workflow" class="hover:text-brand-500">워크플로우</a>
-        <a href="#pricing" class="hover:text-brand-500">요금제</a>
+        <a href="#pricing" class="hover:text-brand-500">${options.billingEnabled ? '요금제' : '베타 운영'}</a>
         <a href="#faq" class="hover:text-brand-500">FAQ</a>
       </div>
       <div class="flex items-center gap-3">
         <a href="/login" class="text-sm text-gray-600 hover:text-brand-500">로그인</a>
-        <a href="/login" class="bg-brand-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-brand-600 transition">무료 시작</a>
+        <a href="/login" class="bg-brand-500 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-brand-600 transition">${primaryCta}</a>
       </div>
     </div>
   </nav>
@@ -127,26 +427,24 @@ function landingPage() {
     <div class="max-w-7xl mx-auto px-6 grid md:grid-cols-2 gap-12 items-center">
       <div class="fade-in">
         <div class="inline-flex items-center gap-2 bg-brand-100 text-brand-700 px-3 py-1 rounded-full text-xs font-medium mb-6">
-          <i class="fas fa-sparkles"></i> AI 기반 리뷰 자동답변 SaaS
+          <i class="fas fa-sparkles"></i> ${heroBadge}
         </div>
         <h1 class="text-4xl md:text-5xl font-extrabold text-gray-900 leading-tight mb-6">
           쉽고 빠르게<br><span class="text-brand-500">리뷰 관리!</span>
         </h1>
         <p class="text-lg text-gray-600 mb-8 leading-relaxed">
-          배달 리뷰를 자동으로 목소리에 맞는 답변 작성,<br>시간을 아끼고 고객 만족을 챙기세요!
+          ${heroDescription}
         </p>
         <div class="flex flex-wrap gap-4">
           <a href="/login" class="bg-brand-500 text-white px-8 py-3.5 rounded-xl font-semibold hover:bg-brand-600 transition shadow-lg shadow-brand-500/30">
-            <i class="fas fa-rocket mr-2"></i>무료로 시작하기
+            <i class="fas fa-rocket mr-2"></i>${primaryCta}
           </a>
           <a href="#workflow" class="border-2 border-gray-300 text-gray-700 px-8 py-3.5 rounded-xl font-semibold hover:border-brand-500 hover:text-brand-500 transition">
             데모 보기
           </a>
         </div>
         <div class="flex items-center gap-6 mt-8 text-sm text-gray-500">
-          <span><i class="fas fa-check text-green-500 mr-1"></i>신용카드 불필요</span>
-          <span><i class="fas fa-check text-green-500 mr-1"></i>14일 무료 체험</span>
-          <span><i class="fas fa-check text-green-500 mr-1"></i>즉시 시작</span>
+          ${heroChecks.map((item) => `<span><i class="fas fa-check text-green-500 mr-1"></i>${item}</span>`).join('')}
         </div>
       </div>
       <div class="fade-in relative">
@@ -232,30 +530,11 @@ function landingPage() {
   <section id="pricing" class="py-20 bg-white">
     <div class="max-w-7xl mx-auto px-6">
       <div class="text-center mb-16">
-        <h2 class="text-3xl font-bold text-gray-900 mb-4">요금제 안내</h2>
-        <p class="text-gray-500">매장 규모에 맞는 플랜을 선택하세요</p>
+        <h2 class="text-3xl font-bold text-gray-900 mb-4">${options.billingEnabled ? '요금제 안내' : '무료 베타 운영 안내'}</h2>
+        <p class="text-gray-500">${options.billingEnabled ? '매장 규모에 맞는 플랜을 선택하세요' : '지금은 결제 없이 핵심 자동화 기능 검증에 집중하는 단계입니다'}</p>
       </div>
       <div class="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
-        ${[
-          { name: '베이직', price: '29,000', reviews: '300', features: ['리뷰 응답 300건/월', '기본 분석 리포트', '1개 플랫폼 연결'], popular: false },
-          { name: '프로', price: '59,000', reviews: '800', features: ['리뷰 응답 800건/월', '고급 분석 대시보드', '3개 플랫폼 연결', '말투 학습 기능', '단골 고객 분석'], popular: true },
-          { name: '프리미엄', price: '99,000', reviews: '2,000', features: ['리뷰 응답 2,000건/월', '프리미엄 분석', '무제한 플랫폼', '우선 지원', 'API 연동'], popular: false }
-        ].map(p => `
-          <div class="relative bg-white rounded-2xl border-2 ${p.popular ? 'border-brand-500 shadow-xl shadow-brand-500/10' : 'border-gray-100'} p-8 card-hover">
-            ${p.popular ? '<div class="absolute -top-4 left-1/2 -translate-x-1/2 bg-brand-500 text-white text-xs font-bold px-4 py-1 rounded-full">가장 인기</div>' : ''}
-            <h3 class="text-xl font-bold text-gray-900 mb-2">${p.name}</h3>
-            <div class="mb-6">
-              <span class="text-4xl font-extrabold text-gray-900">₩${p.price}</span>
-              <span class="text-gray-400">/월</span>
-            </div>
-            <ul class="space-y-3 mb-8">
-              ${p.features.map(f => `<li class="flex items-center gap-2 text-sm text-gray-600"><i class="fas fa-check text-brand-500 text-xs"></i>${f}</li>`).join('')}
-            </ul>
-            <a href="/login" class="block text-center py-3 rounded-xl font-semibold transition ${p.popular ? 'bg-brand-500 text-white hover:bg-brand-600 shadow-lg shadow-brand-500/30' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}">
-              지금 시작하기
-            </a>
-          </div>
-        `).join('')}
+        ${pricingMarkup}
       </div>
     </div>
   </section>
@@ -291,7 +570,7 @@ function landingPage() {
           { q: 'AI 답변은 얼마나 자연스러운가요?', a: 'GPT 기반으로 사장님의 말투를 학습하여 AI 티가 나지 않는 자연스러운 답변을 생성합니다. 품질 점수 시스템으로 답변 품질도 확인 가능합니다.' },
           { q: '리뷰 응답으로 저장할 수 있나요?', a: '네! 모든 리뷰와 답변은 자동으로 저장되며, 대시보드에서 언제든 확인할 수 있습니다. 메뉴별, 기간별 분석 리포트도 제공합니다.' },
           { q: '다른 배달 플랫폼도 지원하나요?', a: '현재 배달의민족, 쿠팡이츠, 요기요 3대 플랫폼을 모두 지원합니다. 향후 더 많은 플랫폼을 추가할 예정입니다.' },
-          { q: '무료 체험 기간이 있나요?', a: '네, 14일 무료 체험을 제공합니다. 신용카드 정보 없이 바로 시작하실 수 있어요.' }
+          faqPricing
         ].map((faq, i) => `
           <div class="border border-gray-200 rounded-xl overflow-hidden">
             <button onclick="toggleFaq(${i})" class="w-full flex items-center justify-between p-5 text-left hover:bg-gray-50 transition">
@@ -309,9 +588,9 @@ function landingPage() {
   <section class="py-20 bg-gradient-to-r from-brand-500 to-brand-600">
     <div class="max-w-4xl mx-auto px-6 text-center">
       <h2 class="text-3xl md:text-4xl font-bold text-white mb-4">지금 바로 시작해보세요!</h2>
-      <p class="text-brand-100 mb-8 text-lg">14일 무료 체험 · 신용카드 불필요 · 즉시 시작</p>
+      <p class="text-brand-100 mb-8 text-lg">${ctaSubcopy}</p>
       <div class="flex flex-wrap justify-center gap-4">
-        <a href="/login" class="bg-white text-brand-600 px-8 py-3.5 rounded-xl font-bold hover:shadow-lg transition">무료로 시작하기 <i class="fas fa-arrow-right ml-2"></i></a>
+        <a href="/login" class="bg-white text-brand-600 px-8 py-3.5 rounded-xl font-bold hover:shadow-lg transition">${primaryCta} <i class="fas fa-arrow-right ml-2"></i></a>
         <a href="/login" class="border-2 border-white/50 text-white px-8 py-3.5 rounded-xl font-semibold hover:bg-white/10 transition">데모 요청하기</a>
       </div>
     </div>
@@ -345,7 +624,8 @@ function landingPage() {
 // ============================================================
 //  LOGIN PAGE
 // ============================================================
-function loginPage() {
+function loginPage(initialTab: 'login' | 'signup' = 'login') {
+  const isSignup = initialTab === 'signup'
   return `${baseHead('로그인')}
 <body class="bg-brand-50 min-h-screen flex items-center justify-center p-4">
   <div class="w-full max-w-md">
@@ -358,10 +638,10 @@ function loginPage() {
     </div>
     <div class="bg-white rounded-2xl shadow-xl p-8 border border-gray-100">
       <div class="flex bg-gray-100 rounded-xl p-1 mb-6">
-        <button id="tab-login" onclick="switchTab('login')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold bg-white shadow text-gray-900">로그인</button>
-        <button id="tab-signup" onclick="switchTab('signup')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold text-gray-500">회원가입</button>
+        <button id="tab-login" onclick="switchTab('login')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold ${isSignup ? 'text-gray-500' : 'bg-white shadow text-gray-900'}">로그인</button>
+        <button id="tab-signup" onclick="switchTab('signup')" class="flex-1 py-2.5 rounded-lg text-sm font-semibold ${isSignup ? 'bg-white shadow text-gray-900' : 'text-gray-500'}">회원가입</button>
       </div>
-      <form id="form-login" onsubmit="handleLogin(event)">
+      <form id="form-login" class="${isSignup ? 'hidden' : ''}" onsubmit="handleLogin(event)">
         <div class="space-y-4">
           <div>
             <label class="text-sm font-medium text-gray-700 mb-1 block">이메일</label>
@@ -376,7 +656,7 @@ function loginPage() {
           </button>
         </div>
       </form>
-      <form id="form-signup" class="hidden" onsubmit="handleSignup(event)">
+      <form id="form-signup" class="${isSignup ? '' : 'hidden'}" onsubmit="handleSignup(event)">
         <div class="space-y-4">
           <div>
             <label class="text-sm font-medium text-gray-700 mb-1 block">이름</label>
@@ -400,7 +680,7 @@ function loginPage() {
         </div>
       </form>
       <div class="mt-4 text-center space-y-2">
-        <a href="/dashboard" class="text-xs text-gray-400 hover:text-brand-500 block">데모 대시보드 바로가기 →</a>
+        <a href="/login?demo=1" class="text-xs text-gray-400 hover:text-brand-500 block">테스트 계정으로 바로 로그인 →</a>
         <div class="border-t border-gray-100 pt-3 mt-3">
           <p class="text-[10px] text-gray-400 mb-2">테스트 계정</p>
           <div class="flex gap-2 justify-center">
@@ -416,6 +696,28 @@ function loginPage() {
     </div>
   </div>
   <script>
+    const redirectTarget = resolveSafeNextPath(new URL(window.location.href).searchParams.get('next')) || null;
+
+    const existingSession = getAuthSession();
+    if (existingSession?.access_token && existingSession?.user) {
+      window.location.href = redirectTarget || (isAdminUser(existingSession.user) ? '/admin' : '/dashboard');
+    } else {
+      refreshAuthSession().then(function(restored) {
+        if (!restored) return;
+        const restoredSession = getAuthSession();
+        if (!restoredSession?.user) return;
+        window.location.href = redirectTarget || (isAdminUser(restoredSession.user) ? '/admin' : '/dashboard');
+      });
+    }
+
+    if (window.location.search.includes('demo=1')) {
+      fillOwner();
+    }
+
+    if (window.location.pathname === '/signup') {
+      switchTab('signup');
+    }
+
     function switchTab(tab) {
       document.getElementById('form-login').classList.toggle('hidden', tab !== 'login');
       document.getElementById('form-signup').classList.toggle('hidden', tab !== 'signup');
@@ -432,19 +734,60 @@ function loginPage() {
       document.getElementById('login-pw').value = 'admin123';
       switchTab('login');
     }
-    function handleLogin(e) {
+    async function handleLogin(e) {
       e.preventDefault();
-      const email = document.getElementById('login-email').value;
-      // 관리자 계정이면 관리자 대시보드로
-      if (email.includes('admin@')) {
-        localStorage.setItem('respondio_user', JSON.stringify({ role: 'admin', email }));
-        window.location.href = '/admin';
-      } else {
-        localStorage.setItem('respondio_user', JSON.stringify({ role: 'owner', email }));
-        window.location.href = '/dashboard';
+      const email = document.getElementById('login-email').value.trim();
+      const password = document.getElementById('login-pw').value;
+
+      try {
+        const response = await apiFetch('/api/v1/auth/login', {
+          method: 'POST',
+          body: JSON.stringify({ email, password })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data?.error?.message || '로그인에 실패했습니다.');
+          return;
+        }
+
+        saveAuthSession(data);
+        window.location.href = redirectTarget || (isAdminUser(data.user) ? '/admin' : '/dashboard');
+      } catch (error) {
+        alert('로그인에 실패했습니다: ' + error.message);
       }
     }
-    function handleSignup(e) { e.preventDefault(); window.location.href = '/dashboard'; }
+    async function handleSignup(e) {
+      e.preventDefault();
+
+      const name = document.getElementById('signup-name').value.trim();
+      const email = document.getElementById('signup-email').value.trim();
+      const password = document.getElementById('signup-pw').value;
+      const agreed = document.getElementById('agree').checked;
+
+      if (!agreed) {
+        alert('약관 동의가 필요합니다.');
+        return;
+      }
+
+      try {
+        const response = await apiFetch('/api/v1/auth/signup', {
+          method: 'POST',
+          body: JSON.stringify({ name, email, password })
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+          alert(data?.error?.message || '회원가입에 실패했습니다.');
+          return;
+        }
+
+        saveAuthSession(data);
+        window.location.href = redirectTarget || '/dashboard';
+      } catch (error) {
+        alert('회원가입에 실패했습니다: ' + error.message);
+      }
+    }
   </script>
 </body>
 </html>`
@@ -453,12 +796,12 @@ function loginPage() {
 // ============================================================
 //  SIDEBAR COMPONENT
 // ============================================================
-function userSidebar(active: string) {
+function userSidebar(active: string, billingEnabled: boolean) {
   const items = [
     { id: 'dashboard', icon: 'fa-chart-pie', label: '대시보드', href: '/dashboard' },
     { id: 'reviews', icon: 'fa-comments', label: '리뷰 관리', href: '/reviews' },
     { id: 'customers', icon: 'fa-users', label: '고객 분석', href: '/customers' },
-    { id: 'billing', icon: 'fa-credit-card', label: '구독/결제', href: '/billing' },
+    { id: 'billing', icon: billingEnabled ? 'fa-credit-card' : 'fa-flask', label: billingEnabled ? '구독/결제' : '베타 안내', href: '/billing' },
     { id: 'settings', icon: 'fa-cog', label: '설정', href: '/settings' },
   ]
   return `
@@ -476,7 +819,7 @@ function userSidebar(active: string) {
       `).join('')}
     </nav>
     <div class="p-2 border-t border-gray-50 flex-shrink-0">
-      <a href="/" class="flex items-center gap-3 px-3 py-3 rounded-xl text-gray-400 hover:text-red-500 hover:bg-red-50 transition">
+      <a href="/login" onclick="logout(); return false;" class="flex items-center gap-3 px-3 py-3 rounded-xl text-gray-400 hover:text-red-500 hover:bg-red-50 transition">
         <i class="fas fa-sign-out-alt text-base w-5 text-center flex-shrink-0"></i>
         <span class="text-sm whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">로그아웃</span>
       </a>
@@ -487,10 +830,10 @@ function userSidebar(active: string) {
 // ============================================================
 //  DASHBOARD PAGE
 // ============================================================
-function dashboardPage() {
+function dashboardPage(options: PageOptions) {
   return `${baseHead('대시보드')}
 <body class="bg-gray-50 min-h-screen">
-  ${userSidebar('dashboard')}
+  ${userSidebar('dashboard', options.billingEnabled)}
   <main class="ml-[72px] p-6">
     <!-- Header -->
     <div class="flex items-center justify-between mb-6">
@@ -512,12 +855,12 @@ function dashboardPage() {
     <!-- KPI Cards -->
     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
       ${[
-        { label: '총 리뷰', value: '2,450', sub: '건', icon: 'fa-comments', color: 'brand', bg: 'brand-50' },
-        { label: '미응답 리뷰', value: '3', sub: '건', icon: 'fa-clock', color: 'red', bg: 'red-50' },
-        { label: '평균 평점', value: '4.6', sub: '★★★★★', icon: 'fa-star', color: 'yellow', bg: 'yellow-50' },
-        { label: '긍정 비율', value: '82', sub: '%', icon: 'fa-smile', color: 'green', bg: 'green-50' },
-        { label: '재방문 고객', value: '45', sub: '%', icon: 'fa-user-check', color: 'blue', bg: 'blue-50' },
-        { label: 'AI 품질점수', value: '9.2', sub: '우수', icon: 'fa-robot', color: 'brand', bg: 'brand-50' }
+        { key: 'total_reviews', label: '총 리뷰', value: '2,450', sub: '건', icon: 'fa-comments', color: 'brand', bg: 'brand-50' },
+        { key: 'pending_reviews', label: '미응답 리뷰', value: '3', sub: '건', icon: 'fa-clock', color: 'red', bg: 'red-50' },
+        { key: 'avg_rating', label: '평균 평점', value: '4.6', sub: '점', icon: 'fa-star', color: 'yellow', bg: 'yellow-50' },
+        { key: 'positive_ratio', label: '긍정 비율', value: '82', sub: '%', icon: 'fa-smile', color: 'green', bg: 'green-50' },
+        { key: 'repeat_customer_ratio', label: '재방문 고객', value: '45', sub: '%', icon: 'fa-user-check', color: 'blue', bg: 'blue-50' },
+        { key: 'ai_quality_score', label: 'AI 품질점수', value: '9.2', sub: '점', icon: 'fa-robot', color: 'brand', bg: 'brand-50' }
       ].map(kpi => `
         <div class="bg-white rounded-2xl p-5 border border-gray-100 card-hover">
           <div class="flex items-center gap-2 mb-3">
@@ -527,8 +870,8 @@ function dashboardPage() {
             <span class="text-xs text-gray-400 font-medium">${kpi.label}</span>
           </div>
           <div class="flex items-end gap-1">
-            <span class="text-2xl font-bold text-gray-900">${kpi.value}</span>
-            <span class="text-sm text-gray-400 mb-0.5">${kpi.sub}</span>
+            <span class="text-2xl font-bold text-gray-900" data-kpi-value="${kpi.key}">${kpi.value}</span>
+            <span class="text-sm text-gray-400 mb-0.5" data-kpi-unit="${kpi.key}">${kpi.sub}</span>
           </div>
         </div>
       `).join('')}
@@ -597,6 +940,15 @@ function dashboardPage() {
   </main>
 
   <script>
+    ensureAuthenticated();
+    const currentUser = getCurrentUser();
+    if (currentUser?.name) {
+      const greeting = document.querySelector('h1.text-2xl.font-bold.text-gray-900');
+      if (greeting) {
+        greeting.textContent = '안녕하세요, ' + currentUser.name + '님 👋';
+      }
+    }
+
     // Menu Rating Chart
     new Chart(document.getElementById('menuChart'), {
       type: 'bar',
@@ -644,8 +996,32 @@ function dashboardPage() {
       }
     });
 
+    apiFetch('/api/v1/dashboard/summary').then(r=>r.json()).then(data => {
+      if (!data || data.error) return;
+
+      const unitOverrides = {
+        total_reviews: '건',
+        pending_reviews: '건',
+        avg_rating: '점',
+        positive_ratio: '%',
+        repeat_customer_ratio: '%',
+        ai_quality_score: '점'
+      };
+
+      Object.entries(unitOverrides).forEach(([key, unit]) => {
+        const valueEl = document.querySelector('[data-kpi-value="' + key + '"]');
+        const unitEl = document.querySelector('[data-kpi-unit="' + key + '"]');
+        if (valueEl && data[key] !== undefined) {
+          valueEl.textContent = String(data[key]);
+        }
+        if (unitEl) {
+          unitEl.textContent = unit;
+        }
+      });
+    }).catch(() => {});
+
     // Load recent reviews from API
-    fetch('/api/v1/reviews?limit=4').then(r=>r.json()).then(data => {
+    apiFetch('/api/v1/reviews?limit=4').then(r=>r.json()).then(data => {
       const reviews = data.reviews || data;
       const container = document.getElementById('recent-reviews');
       if(!container || !Array.isArray(reviews)) return;
@@ -671,7 +1047,7 @@ function dashboardPage() {
     });
 
     // Load top customers
-    fetch('/api/v1/dashboard/repeat_customers').then(r=>r.json()).then(data => {
+    apiFetch('/api/v1/dashboard/repeat_customers').then(r=>r.json()).then(data => {
       const customers = data.customers || data;
       const container = document.getElementById('top-customers');
       if(!container || !Array.isArray(customers)) return;
@@ -691,9 +1067,9 @@ function dashboardPage() {
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>AI 생성 중...';
       try {
-        const res = await fetch('/api/v1/reviews/' + id + '/generate', { method: 'POST' });
+        const res = await apiFetch('/api/v1/reviews/' + id + '/generate', { method: 'POST' });
         const data = await res.json();
-        if (data.error) { alert(data.error); return; }
+        if (data.error) { alert(data?.error?.message || 'AI 답변 생성에 실패했습니다.'); return; }
         location.reload();
       } catch(e) { alert('AI 답변 생성 실패: ' + e.message); }
       finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-magic mr-1"></i>답변 생성'; }
@@ -706,17 +1082,17 @@ function dashboardPage() {
 // ============================================================
 //  REVIEWS PAGE
 // ============================================================
-function reviewsPage() {
+function reviewsPage(options: PageOptions) {
   return `${baseHead('리뷰 관리')}
 <body class="bg-gray-50 min-h-screen">
-  ${userSidebar('reviews')}
+  ${userSidebar('reviews', options.billingEnabled)}
   <main class="ml-[72px] p-6">
     <!-- Header -->
     <div class="flex items-center justify-between mb-6">
       <h1 class="text-2xl font-bold text-gray-900">리뷰 관리</h1>
       <div class="flex items-center gap-3">
         <button onclick="syncReviews()" class="bg-green-500 text-white px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-green-600 transition shadow-lg shadow-green-500/30" id="btn-sync">
-          <i class="fas fa-sync-alt mr-2"></i>리뷰 수집
+          <i class="fas fa-sync-alt mr-2"></i>실제 리뷰 수집
         </button>
         <button onclick="batchGenerate()" class="border border-brand-500 text-brand-500 px-4 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-50 transition" id="btn-batch-gen">
           <i class="fas fa-wand-magic-sparkles mr-2"></i>AI 일괄 생성
@@ -800,13 +1176,48 @@ function reviewsPage() {
   </main>
 
   <script>
+    ensureAuthenticated();
+
     let allReviews = [];
     let selectedReview = null;
+    let platformConnections = [];
 
-    fetch('/api/v1/reviews?limit=50').then(r=>r.json()).then(data => {
+    apiFetch('/api/v1/reviews?limit=50').then(r=>r.json()).then(data => {
       allReviews = data.reviews || data || [];
       renderReviews(allReviews);
     });
+
+    apiFetch('/api/v1/platform_connections').then(r=>r.json()).then(data => {
+      platformConnections = data.connections || [];
+      updateSyncButtonLabel(getLiveReadyPlatforms());
+    }).catch(() => {});
+
+    function getLiveReadyPlatforms() {
+      return platformConnections
+        .filter(c => c.connection_status === 'connected' && (c.has_credentials || c.auth_mode === 'direct_session'))
+        .map(c => c.platform);
+    }
+
+    function getPlatformLabel(platform) {
+      const labels = {
+        baemin: '배달의민족',
+        coupang_eats: '쿠팡이츠',
+        yogiyo: '요기요'
+      };
+      return labels[platform] || platform;
+    }
+
+    function updateSyncButtonLabel(connectedPlatforms) {
+      const btn = document.getElementById('btn-sync');
+      if (!btn) return;
+
+      if (!connectedPlatforms.length) {
+        btn.innerHTML = '<i class="fas fa-link-slash mr-2"></i>연결 필요';
+        return;
+      }
+
+      btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>' + connectedPlatforms.map(getPlatformLabel).join(', ') + ' 수집';
+    }
 
     function renderReviews(reviews) {
       const container = document.getElementById('review-list');
@@ -845,6 +1256,11 @@ function reviewsPage() {
       const panel = document.getElementById('ai-response-content');
       const replyText = selectedReview.reply_text || selectedReview.candidate_text || '';
       const score = selectedReview.quality_score || 0;
+      const actionButton = selectedReview.status === 'posted'
+        ? '<button class="py-2.5 bg-green-100 text-green-700 rounded-xl text-sm font-semibold cursor-default"><i class="fas fa-check mr-1"></i>등록 완료</button>'
+        : selectedReview.status === 'approved'
+          ? '<button onclick="postApprovedReply(' + selectedReview.id + ')" class="py-2.5 bg-blue-500 text-white rounded-xl text-sm font-semibold hover:bg-blue-600 transition"><i class="fas fa-paper-plane mr-1"></i>수동 등록</button>'
+          : '<button onclick="approveReply(' + selectedReview.id + ')" class="py-2.5 bg-brand-500 text-white rounded-xl text-sm font-semibold hover:bg-brand-600 transition"><i class="fas fa-check mr-1"></i>승인</button>';
       if(replyText) {
         panel.innerHTML = \`
           <div class="mb-4">
@@ -855,10 +1271,11 @@ function reviewsPage() {
             <span class="text-sm text-gray-500">품질 점수:</span>
             <span class="text-lg font-bold text-brand-500">\${score.toFixed?.(1) || score}</span>
           </div>
-          <div class="grid grid-cols-3 gap-2 mb-4">
+          <div class="grid grid-cols-2 gap-2 mb-4">
             <button onclick="regenerate()" class="py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition"><i class="fas fa-redo mr-1"></i>재생성</button>
             <button onclick="editReply()" class="py-2.5 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-50 transition"><i class="fas fa-pen mr-1"></i>수정</button>
-            <button onclick="approveReply(\${selectedReview.id})" class="py-2.5 bg-brand-500 text-white rounded-xl text-sm font-semibold hover:bg-brand-600 transition"><i class="fas fa-check mr-1"></i>승인</button>
+            <button onclick="saveReply()" class="py-2.5 border border-brand-200 rounded-xl text-sm font-medium text-brand-600 hover:bg-brand-50 transition"><i class="fas fa-save mr-1"></i>저장</button>
+            \${actionButton}
           </div>
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2">
@@ -890,9 +1307,9 @@ function reviewsPage() {
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>AI 생성 중...';
       try {
-        const res = await fetch('/api/v1/reviews/batch-generate', { method:'POST' });
+        const res = await apiFetch('/api/v1/reviews/batch-generate', { method:'POST' });
         const data = await res.json();
-        if(data.error) { alert(data.error); return; }
+        if(data.error) { alert(data?.error?.message || '일괄 생성에 실패했습니다.'); return; }
         alert(data.generated_count + '건의 AI 답변이 생성되었습니다!');
         location.reload();
       } catch(e) { alert('일괄 생성 실패: ' + e.message); }
@@ -901,30 +1318,55 @@ function reviewsPage() {
 
     async function syncReviews() {
       const btn = document.getElementById('btn-sync');
+      const livePlatforms = getLiveReadyPlatforms();
+      const targetPlatforms = livePlatforms;
+
+      if (!targetPlatforms.length) {
+        alert('실제 수집을 하려면 설정 화면에서 먼저 연결된 플랫폼이 1개 이상 있어야 합니다.');
+        return;
+      }
+
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>수집 중...';
       try {
-        // 3개 플랫폼 순차 수집
         let totalInserted = 0;
-        for (const platform of ['baemin', 'coupang_eats', 'yogiyo']) {
+        let totalFailed = 0;
+        const failures = [];
+
+        for (const platform of targetPlatforms) {
           try {
-            const res = await fetch('/api/v1/reviews/sync', {
+            const res = await apiFetch('/api/v1/reviews/sync', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ platform, store_id: 1 })
+              body: JSON.stringify({ platform })
             });
             const data = await res.json();
             if (data.inserted) totalInserted += data.inserted;
-          } catch(e) { console.error(platform, e); }
+            if (!data.success) {
+              totalFailed += 1;
+              const errorMessage = Array.isArray(data.results) && data.results[0]?.error
+                ? data.results[0].error
+                : data?.error?.message || '수집 실패';
+              failures.push(getPlatformLabel(platform) + ': ' + errorMessage);
+            }
+          } catch(e) {
+            totalFailed += 1;
+            failures.push(getPlatformLabel(platform) + ': ' + e.message);
+          }
         }
         if (totalInserted > 0) {
-          alert(totalInserted + '건의 새 리뷰가 수집되었습니다!');
+          const summary = totalInserted + '건의 새 리뷰가 수집되었습니다!\\n실행 플랫폼: ' + targetPlatforms.map(getPlatformLabel).join(', ');
+          alert(summary);
           location.reload();
+        } else if (totalFailed > 0) {
+          alert('실제 수집에 실패한 플랫폼이 있습니다.\\n\\n' + failures.join('\\n\\n'));
         } else {
-          alert('새로운 리뷰가 없거나 크롤러 서버가 실행 중이 아닙니다.\\n\\n크롤러 시작: pm2 start crawler/ecosystem.config.cjs');
+          alert('새로운 리뷰가 없습니다.');
         }
       } catch(e) { alert('리뷰 수집 실패: ' + e.message); }
-      finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>리뷰 수집'; }
+      finally {
+        btn.disabled = false;
+        updateSyncButtonLabel(getLiveReadyPlatforms());
+      }
     }
     function applyFilter() {}
     function resetFilters() { renderReviews(allReviews); }
@@ -933,11 +1375,11 @@ function reviewsPage() {
       const panel = document.getElementById('ai-response-content');
       panel.innerHTML = '<div class="text-center py-8"><i class="fas fa-spinner fa-spin text-brand-500 text-2xl"></i><p class="mt-3 text-sm text-gray-500">AI가 새로운 답변을 생성하고 있습니다...</p></div>';
       try {
-        const res = await fetch('/api/v1/reviews/' + selectedReview.id + '/generate', { method: 'POST' });
+        const res = await apiFetch('/api/v1/reviews/' + selectedReview.id + '/generate', { method: 'POST' });
         const data = await res.json();
-        if (data.error) { alert(data.error); selectReview(selectedReview.id); return; }
+        if (data.error) { alert(data?.error?.message || '재생성에 실패했습니다.'); selectReview(selectedReview.id); return; }
         // Refresh reviews
-        const rr = await fetch('/api/v1/reviews?limit=50');
+        const rr = await apiFetch('/api/v1/reviews?limit=50');
         const rd = await rr.json();
         allReviews = rd.reviews || [];
         renderReviews(allReviews);
@@ -946,14 +1388,72 @@ function reviewsPage() {
         selectReview(selectedReview.id);
       } catch(e) { alert('재생성 실패: ' + e.message); selectReview(selectedReview.id); }
     }
-    function editReply() { const el = document.getElementById('reply-text'); if(el) el.contentEditable = true; el.focus(); el.style.border = '2px solid #F97316'; }
+
+    function getEditedReplyText() {
+      const el = document.getElementById('reply-text');
+      return el ? el.innerText.trim() : '';
+    }
+
+    function editReply() {
+      const el = document.getElementById('reply-text');
+      if (!el) return;
+      el.contentEditable = true;
+      el.focus();
+      el.style.border = '2px solid #F97316';
+    }
+
+    async function saveReply() {
+      if (!selectedReview) return;
+      const replyText = getEditedReplyText();
+      if (!replyText) {
+        alert('저장할 답변 내용을 입력해주세요.');
+        return;
+      }
+
+      try {
+        const res = await apiFetch('/api/v1/reviews/' + selectedReview.id + '/reply', {
+          method: 'PATCH',
+          body: JSON.stringify({ reply_text: replyText })
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          alert(data?.error?.message || '답변 저장에 실패했습니다.');
+          return false;
+        }
+
+        selectedReview.reply_text = replyText;
+        selectedReview.candidate_text = replyText;
+        const el = document.getElementById('reply-text');
+        if (el) {
+          el.contentEditable = false;
+          el.style.border = '1px solid #FED7AA';
+        }
+        return true;
+      } catch (e) {
+        alert('답변 저장 실패: ' + e.message);
+        return false;
+      }
+    }
+
     async function approveReply(id) {
       try {
-        const res = await fetch('/api/v1/reviews/approve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({review_ids:[id]}) });
+        const currentReplyText = getEditedReplyText();
+        const savedReplyText = (selectedReview?.reply_text || selectedReview?.candidate_text || '').trim();
+        if (currentReplyText && currentReplyText !== savedReplyText) {
+          const saved = await saveReply();
+          if (!saved) return;
+        }
+
+        const res = await apiFetch('/api/v1/reviews/approve', { method:'POST', body: JSON.stringify({review_ids:[id], auto_post:true}) });
         const data = await res.json();
         if(data.success) {
-          const rr = await fetch('/api/v1/reviews?limit=50'); const rd = await rr.json(); allReviews = rd.reviews||[]; renderReviews(allReviews);
-          document.getElementById('ai-response-content').innerHTML = '<div class="text-center py-8"><i class="fas fa-check-circle text-green-500 text-3xl"></i><p class="mt-3 text-sm text-green-600 font-semibold">답변이 승인되었습니다!</p></div>';
+          const rr = await apiFetch('/api/v1/reviews?limit=50'); const rd = await rr.json(); allReviews = rd.reviews||[]; renderReviews(allReviews);
+          const statusMessage = data.posted_count > 0
+            ? '답변이 승인되고 플랫폼에 등록되었습니다!'
+            : '답변이 승인되었습니다. 플랫폼 등록은 대기 또는 실패 상태입니다.';
+          document.getElementById('ai-response-content').innerHTML = '<div class="text-center py-8"><i class="fas fa-check-circle text-green-500 text-3xl"></i><p class="mt-3 text-sm text-green-600 font-semibold">'+statusMessage+'</p></div>';
+        } else {
+          alert(data?.error?.message || '승인에 실패했습니다.');
         }
       } catch(e) { alert('승인 실패: ' + e.message); }
     }
@@ -961,21 +1461,45 @@ function reviewsPage() {
       const generatedIds = allReviews.filter(r => r.status === 'generated').map(r => r.id);
       if(!generatedIds.length) { alert('승인할 답변이 없습니다.'); return; }
       try {
-        const res = await fetch('/api/v1/reviews/approve', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({review_ids:generatedIds}) });
+        const res = await apiFetch('/api/v1/reviews/approve', { method:'POST', body: JSON.stringify({review_ids:generatedIds, auto_post:true}) });
         const data = await res.json();
-        alert(data.approved_count + '건의 답변이 승인되었습니다!');
+        if (!res.ok || data.error) {
+          alert(data?.error?.message || '일괄 승인에 실패했습니다.');
+          return;
+        }
+        alert(data.approved_count + '건 승인, ' + data.posted_count + '건 등록 완료');
         location.reload();
       } catch(e) { alert('일괄 승인 실패: ' + e.message); }
     }
+
+    async function postApprovedReply(id) {
+      try {
+        const res = await apiFetch('/api/v1/reviews/' + id + '/post', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          alert(data?.error?.message || '답변 등록에 실패했습니다.');
+          return;
+        }
+
+        const rr = await apiFetch('/api/v1/reviews?limit=50');
+        const rd = await rr.json();
+        allReviews = rd.reviews || [];
+        renderReviews(allReviews);
+        selectReview(id);
+      } catch (e) {
+        alert('답변 등록 실패: ' + e.message);
+      }
+    }
+
     async function generateForReview(id) {
       const panel = document.getElementById('ai-response-content');
       panel.innerHTML = '<div class="text-center py-8"><i class="fas fa-spinner fa-spin text-brand-500 text-2xl"></i><p class="mt-3 text-sm text-gray-500">AI가 답변을 생성하고 있습니다...</p><p class="text-xs text-gray-400 mt-1">GPT가 리뷰를 분석 중입니다...</p></div>';
       try {
-        const res = await fetch('/api/v1/reviews/' + id + '/generate', { method: 'POST' });
+        const res = await apiFetch('/api/v1/reviews/' + id + '/generate', { method: 'POST' });
         const data = await res.json();
-        if (data.error) { alert(data.error); return; }
+        if (data.error) { alert(data?.error?.message || 'AI 답변 생성에 실패했습니다.'); return; }
         // Refresh
-        const rr = await fetch('/api/v1/reviews?limit=50'); const rd = await rr.json(); allReviews = rd.reviews||[]; renderReviews(allReviews);
+        const rr = await apiFetch('/api/v1/reviews?limit=50'); const rd = await rr.json(); allReviews = rd.reviews||[]; renderReviews(allReviews);
         selectReview(id);
       } catch(e) { alert('AI 답변 생성 실패: ' + e.message); selectReview(id); }
     }
@@ -987,10 +1511,10 @@ function reviewsPage() {
 // ============================================================
 //  CUSTOMERS PAGE
 // ============================================================
-function customersPage() {
+function customersPage(options: PageOptions) {
   return `${baseHead('고객 분석')}
 <body class="bg-gray-50 min-h-screen">
-  ${userSidebar('customers')}
+  ${userSidebar('customers', options.billingEnabled)}
   <main class="ml-[72px] p-6">
     <h1 class="text-2xl font-bold text-gray-900 mb-6">고객 분석</h1>
     <div class="grid lg:grid-cols-3 gap-6 mb-6">
@@ -1023,7 +1547,9 @@ function customersPage() {
     </div>
   </main>
   <script>
-    fetch('/api/v1/dashboard/repeat_customers').then(r=>r.json()).then(data => {
+    ensureAuthenticated();
+
+    apiFetch('/api/v1/dashboard/repeat_customers').then(r=>r.json()).then(data => {
       const customers = data.customers || data || [];
       document.getElementById('customer-table').innerHTML = customers.map(c => {
         const typeBadge = c.customer_type === 'loyal' ? '<span class="bg-green-100 text-green-700 px-2 py-0.5 rounded-full text-xs">단골</span>' : '<span class="bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full text-xs">재방문</span>';
@@ -1038,122 +1564,367 @@ function customersPage() {
 // ============================================================
 //  BILLING PAGE
 // ============================================================
-function billingPage() {
-  return `${baseHead('구독 및 결제')}
+function billingPage(options: PageOptions) {
+  if (!options.billingEnabled) {
+    return `${baseHead('무료 베타 운영')}
 <body class="bg-gray-50 min-h-screen">
-  ${userSidebar('billing')}
+  ${userSidebar('billing', options.billingEnabled)}
   <main class="ml-[72px] p-6">
-    <h1 class="text-2xl font-bold text-gray-900 mb-6">구독 및 결제</h1>
-
-    <div class="grid lg:grid-cols-[1fr_380px] gap-6 mb-6">
-      <!-- Plan Comparison -->
-      <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-gray-900 mb-5">요금제 비교</h2>
-        <div class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead>
-              <tr class="border-b border-gray-100">
-                <th class="pb-3 text-left text-gray-500 font-medium w-36"></th>
-                <th class="pb-3 text-center font-bold text-gray-700">베이직</th>
-                <th class="pb-3 text-center font-bold text-brand-600 bg-brand-50 rounded-t-xl">프로</th>
-                <th class="pb-3 text-center font-bold text-gray-700">프리미엄</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr class="border-b border-gray-50">
-                <td class="py-4 text-gray-500">월 요금</td>
-                <td class="py-4 text-center font-bold">₩29,000<span class="text-gray-400 font-normal">/월</span></td>
-                <td class="py-4 text-center font-bold bg-brand-50">₩59,000<span class="text-gray-400 font-normal">/월</span></td>
-                <td class="py-4 text-center font-bold">₩99,000<span class="text-gray-400 font-normal">/월</span></td>
-              </tr>
-              <tr class="border-b border-gray-50">
-                <td class="py-4 text-gray-500">리뷰 응답</td>
-                <td class="py-4 text-center">300건/월</td>
-                <td class="py-4 text-center bg-brand-50">800건/월</td>
-                <td class="py-4 text-center">2,000건/월</td>
-              </tr>
-              <tr class="border-b border-gray-50">
-                <td class="py-4 text-gray-500">플랫폼 연결</td>
-                <td class="py-4 text-center">1개</td>
-                <td class="py-4 text-center bg-brand-50">3개</td>
-                <td class="py-4 text-center">무제한</td>
-              </tr>
-              <tr class="border-b border-gray-50">
-                <td class="py-4 text-gray-500">고급 분석</td>
-                <td class="py-4 text-center text-gray-300"><i class="fas fa-times"></i></td>
-                <td class="py-4 text-center bg-brand-50 text-brand-500"><i class="fas fa-check"></i></td>
-                <td class="py-4 text-center text-brand-500"><i class="fas fa-check"></i></td>
-              </tr>
-              <tr>
-                <td class="py-4 text-gray-500">말투 학습</td>
-                <td class="py-4 text-center text-gray-300"><i class="fas fa-times"></i></td>
-                <td class="py-4 text-center bg-brand-50 text-brand-500"><i class="fas fa-check"></i></td>
-                <td class="py-4 text-center text-brand-500"><i class="fas fa-check"></i></td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="flex gap-3 mt-6">
-          <button class="bg-brand-500 text-white px-6 py-2.5 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">요금제 변경</button>
-          <button class="border border-gray-200 text-gray-600 px-6 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">자세히 보기</button>
-        </div>
-      </div>
-
-      <!-- Right Column -->
-      <div class="space-y-6">
-        <!-- Current Plan -->
-        <div class="bg-white rounded-2xl p-6 border border-gray-100">
-          <h3 class="text-sm text-gray-500 mb-2">현재 요금제</h3>
-          <div class="text-brand-500 font-bold text-lg mb-1">프로 요금제</div>
-          <div class="text-3xl font-extrabold text-gray-900 mb-3">₩59,000<span class="text-sm text-gray-400 font-normal">/월</span></div>
-          <div class="text-sm text-gray-500 mb-2">다음 결제일: 2024년 5월 10일</div>
-          <div class="flex items-center gap-2 text-sm text-green-600"><i class="fas fa-check-circle"></i>자동 결제 활성화</div>
-        </div>
-
-        <!-- Payment History -->
-        <div class="bg-white rounded-2xl p-6 border border-gray-100">
-          <h3 class="font-bold text-gray-900 mb-4">결제 내역</h3>
-          <div class="space-y-3" id="payment-history">
-            ${['2024.04.10', '2024.03.10', '2024.02.10', '2024.01.10'].map(d => `
-              <div class="flex items-center justify-between py-2 border-b border-gray-50">
-                <span class="text-sm text-gray-600">${d}</span>
-                <div class="flex items-center gap-3">
-                  <span class="font-bold text-gray-900">₩59,000</span>
-                  <span class="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">결제 완료</span>
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
+    <div id="billing-alert" class="mb-6 rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-700">
+      현재는 무료 베타 운영 중입니다. PortOne 결제는 아직 열지 않았고, 핵심 자동화 기능 검증에 집중하고 있습니다.
     </div>
 
-    <!-- Bottom Row -->
-    <div class="grid lg:grid-cols-2 gap-6">
-      <!-- Payment Method -->
-      <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h3 class="font-bold text-gray-900 mb-4">결제 수단</h3>
-        <div class="flex items-center gap-4 p-4 bg-gray-50 rounded-xl mb-4">
-          <div class="text-2xl font-bold text-blue-800">VISA</div>
-          <div>
-            <div class="font-medium text-gray-900">**** 4242</div>
-            <div class="text-xs text-gray-400">만료일 08/27</div>
-          </div>
-        </div>
-        <div class="flex gap-3">
-          <button class="border border-gray-200 text-gray-600 px-4 py-2 rounded-xl text-sm hover:bg-gray-50 transition">결제 수단 변경</button>
-          <button class="border border-red-200 text-red-500 px-4 py-2 rounded-xl text-sm hover:bg-red-50 transition">결제 수단 삭제</button>
-        </div>
-      </div>
+    <div class="bg-white rounded-2xl p-6 border border-gray-100 mb-6">
+      <h1 class="text-2xl font-bold text-gray-900 mb-3">무료 베타 운영 안내</h1>
+      <p class="text-sm text-gray-600 leading-relaxed">
+        지금은 리뷰 수집, AI 답변 생성, 승인 후 등록, 플랫폼 연결 기능을 먼저 안정화하는 단계입니다.
+        결제와 구독 관리는 정식 출시 시점에 PortOne과 함께 다시 열립니다.
+      </p>
+    </div>
 
-      <!-- Subscription Cancel -->
-      <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h3 class="font-bold text-gray-900 mb-4">구독 해지</h3>
-        <p class="text-sm text-gray-500 mb-6 leading-relaxed">구독을 해지하시겠습니까? 구독을 해지하면 다음 결제단부터 요금제가 갱신되지 않습니다. 현재 결제기간이 끝날 때까지는 모든 기능을 이용하실 수 있습니다.</p>
-        <button class="border-2 border-red-300 text-red-500 px-6 py-2.5 rounded-xl text-sm font-semibold hover:bg-red-50 transition">구독 해지하기</button>
+    <div class="grid lg:grid-cols-3 gap-6 mb-6">
+      ${[
+        {
+          icon: 'fa-robot',
+          title: '지금 바로 쓸 수 있는 기능',
+          body: '리뷰 동기화, 감정 분석, AI 답변 생성, 승인 후 등록, 고객 분석을 바로 테스트할 수 있습니다.'
+        },
+        {
+          icon: 'fa-list-check',
+          title: '베타 시작 순서',
+          body: '설정에서 플랫폼 계정을 연결하고, 리뷰 관리 화면에서 동기화 후 AI 답변 생성 흐름을 확인하면 됩니다.'
+        },
+        {
+          icon: 'fa-credit-card',
+          title: '결제는 나중에 추가',
+          body: 'PortOne 값이 준비되면 셀프 결제와 구독 관리 화면이 그대로 다시 활성화됩니다.'
+        }
+      ].map((card) => `
+        <div class="bg-white rounded-2xl border border-gray-100 p-6 card-hover">
+          <div class="w-12 h-12 bg-brand-50 rounded-2xl flex items-center justify-center mb-4">
+            <i class="fas ${card.icon} text-brand-500 text-lg"></i>
+          </div>
+          <h2 class="text-lg font-bold text-gray-900 mb-2">${card.title}</h2>
+          <p class="text-sm text-gray-600 leading-relaxed">${card.body}</p>
+        </div>
+      `).join('')}
+    </div>
+
+    <div class="bg-white rounded-2xl p-6 border border-gray-100">
+      <h2 class="text-lg font-bold text-gray-900 mb-4">다음으로 하면 좋은 일</h2>
+      <div class="space-y-3 text-sm text-gray-600">
+        <div class="flex items-start gap-3"><span class="w-6 h-6 rounded-full bg-brand-500 text-white flex items-center justify-center text-xs font-bold">1</span><span>설정 화면에서 배민, 쿠팡이츠, 요기요 계정을 연결합니다.</span></div>
+        <div class="flex items-start gap-3"><span class="w-6 h-6 rounded-full bg-brand-500 text-white flex items-center justify-center text-xs font-bold">2</span><span>리뷰 관리 화면에서 실시간 동기화를 실행해 실제 리뷰를 가져옵니다.</span></div>
+        <div class="flex items-start gap-3"><span class="w-6 h-6 rounded-full bg-brand-500 text-white flex items-center justify-center text-xs font-bold">3</span><span>AI 답변 생성과 승인 후 등록 흐름을 먼저 검증합니다.</span></div>
+      </div>
+      <div class="mt-6 flex flex-wrap gap-3">
+        <a href="/settings" class="bg-brand-500 text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">플랫폼 연결하러 가기</a>
+        <a href="/reviews" class="border border-gray-200 text-gray-700 px-5 py-3 rounded-xl text-sm font-semibold hover:bg-gray-50 transition">리뷰 관리 열기</a>
       </div>
     </div>
   </main>
+</body>
+</html>`
+  }
+
+  return `${baseHead('구독 및 결제', '<script src="https://cdn.portone.io/v2/browser-sdk.js"></script>')}
+<body class="bg-gray-50 min-h-screen">
+  ${userSidebar('billing', options.billingEnabled)}
+  <main class="ml-[72px] p-6">
+    <h1 class="text-2xl font-bold text-gray-900 mb-6">구독 및 결제</h1>
+
+    <div id="billing-alert" class="hidden mb-6 rounded-2xl border px-5 py-4 text-sm"></div>
+
+    <div class="grid lg:grid-cols-[1fr_380px] gap-6 mb-6">
+      <div class="bg-white rounded-2xl p-6 border border-gray-100">
+        <div class="flex items-center justify-between mb-5">
+          <h2 class="text-lg font-bold text-gray-900">요금제 선택</h2>
+          <span class="text-xs text-gray-400">PortOne 카드 결제</span>
+        </div>
+        <div id="plans-grid" class="grid md:grid-cols-3 gap-4">
+          <div class="col-span-full text-center py-12 text-gray-400">
+            <i class="fas fa-spinner fa-spin text-xl"></i>
+            <p class="mt-3 text-sm">요금제를 불러오는 중...</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="space-y-6">
+        <div class="bg-white rounded-2xl p-6 border border-gray-100">
+          <h3 class="text-sm text-gray-500 mb-2">현재 요금제</h3>
+          <div id="current-plan-name" class="text-brand-500 font-bold text-lg mb-1">없음</div>
+          <div id="current-plan-price" class="text-3xl font-extrabold text-gray-900 mb-3">-</div>
+          <div id="current-plan-period" class="text-sm text-gray-500 mb-2">구독 정보 없음</div>
+          <div id="current-plan-status" class="flex items-center gap-2 text-sm text-gray-400">
+            <i class="fas fa-minus-circle"></i>미구독
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl p-6 border border-gray-100">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="font-bold text-gray-900">결제 내역</h3>
+            <span class="text-xs text-gray-400">최근 20건</span>
+          </div>
+          <div class="space-y-3" id="payment-history">
+            <div class="text-sm text-gray-400">결제 내역을 불러오는 중...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid lg:grid-cols-2 gap-6">
+      <div class="bg-white rounded-2xl p-6 border border-gray-100">
+        <h3 class="font-bold text-gray-900 mb-4">결제 수단</h3>
+        <div id="payment-methods" class="space-y-3">
+          <div class="text-sm text-gray-400">저장된 결제 수단을 불러오는 중...</div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-2xl p-6 border border-gray-100">
+        <h3 class="font-bold text-gray-900 mb-4">구독 해지</h3>
+        <p class="text-sm text-gray-500 mb-6 leading-relaxed">
+          현재 결제 주기가 끝난 뒤 더 이상 갱신되지 않도록 처리합니다. MVP 단계에서는 즉시 해지 대신
+          기간 종료 후 해지 상태로 전환됩니다.
+        </p>
+        <button onclick="cancelSubscription()" class="border-2 border-red-300 text-red-500 px-6 py-2.5 rounded-xl text-sm font-semibold hover:bg-red-50 transition">
+          구독 해지하기
+        </button>
+      </div>
+    </div>
+  </main>
+  <script>
+    ensureAuthenticated();
+
+    let billingConfig = null;
+    let plans = [];
+    let currentSubscription = null;
+
+    function showBillingAlert(message, tone) {
+      const el = document.getElementById('billing-alert');
+      const styles = tone === 'error'
+        ? 'border-red-200 bg-red-50 text-red-700'
+        : tone === 'success'
+          ? 'border-green-200 bg-green-50 text-green-700'
+          : 'border-blue-200 bg-blue-50 text-blue-700';
+      el.className = 'mb-6 rounded-2xl border px-5 py-4 text-sm ' + styles;
+      el.textContent = message;
+      el.classList.remove('hidden');
+    }
+
+    function renderPlans() {
+      const container = document.getElementById('plans-grid');
+      if (!plans.length) {
+        container.innerHTML = '<div class="col-span-full text-center py-12 text-gray-400">활성 요금제가 없습니다.</div>';
+        return;
+      }
+
+      container.innerHTML = plans.map(plan => {
+        const isCurrent = currentSubscription && Number(currentSubscription.plan_id) === Number(plan.id) && currentSubscription.status === 'active';
+        const features = typeof plan.features === 'string' ? JSON.parse(plan.features || '{}') : (plan.features || {});
+        return '<div class="rounded-2xl border ' + (isCurrent ? 'border-brand-500 bg-brand-50' : 'border-gray-200 bg-white') + ' p-5">'
+          + '<div class="flex items-center justify-between mb-3"><div class="text-lg font-bold text-gray-900">' + plan.name + '</div>'
+          + (isCurrent ? '<span class="text-[11px] bg-brand-500 text-white px-2 py-1 rounded-full">현재 이용 중</span>' : '') + '</div>'
+          + '<div class="text-3xl font-extrabold text-gray-900 mb-1">₩' + Number(plan.price || 0).toLocaleString() + '</div>'
+          + '<div class="text-sm text-gray-500 mb-4">월 ' + Number(plan.review_limit || 0).toLocaleString() + '건 리뷰 응답</div>'
+          + '<div class="space-y-2 text-sm text-gray-600 mb-5">'
+          + '<div><i class="fas fa-check text-green-500 mr-2"></i>분석 등급: ' + (features.analytics || 'basic') + '</div>'
+          + '<div><i class="fas fa-check text-green-500 mr-2"></i>답변 스타일: ' + (features.reply_style || 'default') + '</div>'
+          + '<div><i class="fas fa-check text-green-500 mr-2"></i>말투 학습: ' + (features.tone_learning ? '지원' : '미지원') + '</div>'
+          + '</div>'
+          + '<button onclick="startCheckout(' + plan.id + ')" class="w-full py-2.5 rounded-xl text-sm font-semibold '
+          + (isCurrent ? 'bg-white text-brand-600 border border-brand-200' : 'bg-brand-500 text-white hover:bg-brand-600')
+          + ' transition">' + (isCurrent ? '현재 요금제' : '이 요금제로 결제') + '</button>'
+          + '</div>';
+      }).join('');
+    }
+
+    function renderSubscription(subscription) {
+      const nameEl = document.getElementById('current-plan-name');
+      const priceEl = document.getElementById('current-plan-price');
+      const periodEl = document.getElementById('current-plan-period');
+      const statusEl = document.getElementById('current-plan-status');
+
+      if (!subscription) {
+        nameEl.textContent = '없음';
+        priceEl.textContent = '-';
+        periodEl.textContent = '구독 정보 없음';
+        statusEl.className = 'flex items-center gap-2 text-sm text-gray-400';
+        statusEl.innerHTML = '<i class="fas fa-minus-circle"></i>미구독';
+        return;
+      }
+
+      nameEl.textContent = subscription.plan_name || '구독 중';
+      priceEl.innerHTML = '₩' + Number(subscription.price || 0).toLocaleString() + '<span class="text-sm text-gray-400 font-normal">/월</span>';
+      periodEl.textContent = '다음 결제일: ' + new Date(subscription.current_period_end).toLocaleDateString('ko-KR');
+      statusEl.className = 'flex items-center gap-2 text-sm ' + (subscription.status === 'active' ? 'text-green-600' : 'text-yellow-600');
+      statusEl.innerHTML = subscription.cancel_at_period_end
+        ? '<i class="fas fa-clock"></i>기간 종료 후 해지 예정'
+        : '<i class="fas fa-check-circle"></i>' + (subscription.status === 'active' ? '자동 결제 활성화' : subscription.status);
+    }
+
+    function renderPayments(payments) {
+      const container = document.getElementById('payment-history');
+      if (!payments.length) {
+        container.innerHTML = '<div class="text-sm text-gray-400">결제 내역이 없습니다.</div>';
+        return;
+      }
+
+      container.innerHTML = payments.map(payment => {
+        const dateText = payment.paid_at ? new Date(payment.paid_at).toLocaleDateString('ko-KR') : new Date(payment.created_at).toLocaleDateString('ko-KR');
+        const statusMap = {
+          completed: 'bg-green-100 text-green-700',
+          pending: 'bg-yellow-100 text-yellow-700',
+          failed: 'bg-red-100 text-red-700',
+          refunded: 'bg-gray-100 text-gray-700'
+        };
+        return '<div class="flex items-center justify-between py-2 border-b border-gray-50">'
+          + '<div><div class="text-sm text-gray-700">' + dateText + '</div><div class="text-[11px] text-gray-400">' + (payment.payment_id || payment.transaction_id || '-') + '</div></div>'
+          + '<div class="flex items-center gap-3"><span class="font-bold text-gray-900">₩' + Number(payment.amount || 0).toLocaleString() + '</span>'
+          + '<span class="text-xs px-2 py-0.5 rounded-full ' + (statusMap[payment.status] || 'bg-gray-100 text-gray-700') + '">' + payment.status + '</span></div>'
+          + '</div>';
+      }).join('');
+    }
+
+    function renderPaymentMethods(methods) {
+      const container = document.getElementById('payment-methods');
+      if (!methods.length) {
+        container.innerHTML = '<div class="text-sm text-gray-400">저장된 결제 수단이 없습니다. PortOne 결제 후 갱신됩니다.</div>';
+        return;
+      }
+
+      container.innerHTML = methods.map(method => {
+        return '<div class="flex items-center gap-4 p-4 bg-gray-50 rounded-xl">'
+          + '<div class="text-2xl font-bold text-blue-800">' + (method.card_brand || method.type || '').toUpperCase() + '</div>'
+          + '<div><div class="font-medium text-gray-900">**** ' + (method.card_last4 || '----') + '</div>'
+          + '<div class="text-xs text-gray-400">만료일 ' + (method.expiry_date || '-')
+          + (method.is_default ? ' · 기본 결제수단' : '') + '</div></div></div>';
+      }).join('');
+    }
+
+    async function loadBilling() {
+      const [configRes, plansRes, subscriptionRes, paymentsRes, methodsRes] = await Promise.all([
+        apiFetch('/api/v1/billing/config'),
+        apiFetch('/api/v1/plans'),
+        apiFetch('/api/v1/subscriptions'),
+        apiFetch('/api/v1/payments'),
+        apiFetch('/api/v1/payment_methods')
+      ]);
+
+      billingConfig = await configRes.json();
+      const plansData = await plansRes.json();
+      const subscriptionData = await subscriptionRes.json();
+      const paymentsData = await paymentsRes.json();
+      const methodsData = await methodsRes.json();
+
+      plans = plansData.plans || [];
+      currentSubscription = subscriptionData.subscription || null;
+
+      renderSubscription(currentSubscription);
+      renderPlans();
+      renderPayments(paymentsData.payments || []);
+      renderPaymentMethods(methodsData.payment_methods || []);
+
+      if (!billingConfig.configured) {
+        showBillingAlert('PortOne 설정이 아직 완료되지 않았습니다. PORTONE_STORE_ID, PORTONE_CHANNEL_KEY, PORTONE_API_SECRET를 설정해야 실제 결제가 동작합니다.', 'info');
+      }
+
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('paymentId')) {
+        await completePayment(params.get('paymentId'));
+      }
+      if (params.get('code')) {
+        showBillingAlert(params.get('message') || '결제가 취소되었거나 실패했습니다.', 'error');
+      }
+    }
+
+    async function startCheckout(planId) {
+      try {
+        const prepareRes = await apiFetch('/api/v1/billing/checkout', {
+          method: 'POST',
+          body: JSON.stringify({ plan_id: planId })
+        });
+        const prepareData = await prepareRes.json();
+        if (!prepareRes.ok || prepareData.error) {
+          showBillingAlert(prepareData?.error?.message || '결제 준비에 실패했습니다.', 'error');
+          return;
+        }
+
+        if (typeof PortOne === 'undefined' || typeof PortOne.requestPayment !== 'function') {
+          showBillingAlert('PortOne 브라우저 SDK를 불러오지 못했습니다.', 'error');
+          return;
+        }
+
+        const paymentResponse = await PortOne.requestPayment({
+          storeId: prepareData.store_id,
+          channelKey: prepareData.channel_key,
+          paymentId: prepareData.payment_id,
+          orderName: prepareData.order_name,
+          totalAmount: prepareData.amount,
+          currency: 'CURRENCY_KRW',
+          payMethod: 'CARD',
+          redirectUrl: prepareData.redirect_url,
+          customer: {
+            fullName: getCurrentUser()?.name || 'Respondio User',
+            email: getCurrentUser()?.email || ''
+          }
+        });
+
+        if (paymentResponse?.code) {
+          showBillingAlert(paymentResponse.message || '결제가 취소되었거나 실패했습니다.', 'error');
+          return;
+        }
+
+        await completePayment(prepareData.payment_id, planId);
+      } catch (error) {
+        showBillingAlert('결제 요청 실패: ' + error.message, 'error');
+      }
+    }
+
+    async function completePayment(paymentId, planId) {
+      try {
+        const response = await apiFetch('/api/v1/billing/complete', {
+          method: 'POST',
+          body: JSON.stringify({ payment_id: paymentId, plan_id: planId || null })
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          showBillingAlert(data?.error?.message || '결제 검증에 실패했습니다.', 'error');
+          return;
+        }
+
+        const url = new URL(window.location.href);
+        url.searchParams.delete('paymentId');
+        url.searchParams.delete('code');
+        url.searchParams.delete('message');
+        window.history.replaceState({}, '', url.toString());
+
+        showBillingAlert(data.plan_name + ' 결제가 완료되었습니다.', 'success');
+        await loadBilling();
+      } catch (error) {
+        showBillingAlert('결제 완료 처리 실패: ' + error.message, 'error');
+      }
+    }
+
+    async function cancelSubscription() {
+      try {
+        const response = await apiFetch('/api/v1/subscriptions/cancel', { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          showBillingAlert(data?.error?.message || '구독 해지 처리에 실패했습니다.', 'error');
+          return;
+        }
+
+        showBillingAlert('현재 구독은 기간 종료 후 해지되도록 변경되었습니다.', 'success');
+        await loadBilling();
+      } catch (error) {
+        showBillingAlert('구독 해지 실패: ' + error.message, 'error');
+      }
+    }
+
+    loadBilling().catch(error => {
+      showBillingAlert('구독 정보를 불러오지 못했습니다: ' + error.message, 'error');
+    });
+  </script>
 </body>
 </html>`
 }
@@ -1161,46 +1932,1888 @@ function billingPage() {
 // ============================================================
 //  SETTINGS PAGE
 // ============================================================
-function settingsPage() {
+function settingsPage(options: PageOptions) {
   return `${baseHead('설정')}
 <body class="bg-gray-50 min-h-screen">
-  ${userSidebar('settings')}
+  ${userSidebar('settings', options.billingEnabled)}
   <main class="ml-[72px] p-6">
     <h1 class="text-2xl font-bold text-gray-900 mb-6">설정</h1>
-    <div class="max-w-3xl space-y-6">
+    <div id="settings-alert" class="hidden max-w-4xl mb-6 rounded-2xl border px-5 py-4 text-sm"></div>
+    <div class="max-w-4xl space-y-6">
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-gray-900 mb-4">매장 정보</h2>
         <div class="space-y-4">
-          <div><label class="text-sm font-medium text-gray-700 mb-1 block">매장 이름</label><input type="text" value="맛있는 치킨집" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none"></div>
-          <div><label class="text-sm font-medium text-gray-700 mb-1 block">사업자번호</label><input type="text" value="123-45-***" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none"></div>
+          <div>
+            <label class="text-sm font-medium text-gray-700 mb-1 block">매장 이름</label>
+            <input type="text" id="store-name" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">
+          </div>
+          <div>
+            <label class="text-sm font-medium text-gray-700 mb-1 block">사업자번호(마스킹)</label>
+            <input type="text" id="business-number" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">
+          </div>
         </div>
       </div>
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
         <h2 class="text-lg font-bold text-gray-900 mb-4">답변 스타일 설정</h2>
-        <div class="grid grid-cols-2 gap-4">
-          ${['친근형', '정중형', '캐주얼', '커스텀'].map((s, i) => `
-            <label class="flex items-center gap-3 p-4 border ${i===0?'border-brand-500 bg-brand-50':'border-gray-200'} rounded-xl cursor-pointer hover:border-brand-300 transition">
-              <input type="radio" name="style" ${i===0?'checked':''} class="text-brand-500"><span class="font-medium text-sm">${s}</span>
+        <div class="grid grid-cols-2 gap-4 mb-4" id="reply-style-options">
+          ${[
+            ['friendly', '친근형'],
+            ['polite', '정중형'],
+            ['casual', '캐주얼'],
+            ['custom', '커스텀']
+          ].map(([value, label]) => `
+            <label class="flex items-center gap-3 p-4 border border-gray-200 rounded-xl cursor-pointer hover:border-brand-300 transition">
+              <input type="radio" name="style" value="${value}" class="text-brand-500">
+              <span class="font-medium text-sm">${label}</span>
             </label>
           `).join('')}
         </div>
+        <div>
+          <label class="text-sm font-medium text-gray-700 mb-1 block">말투 샘플</label>
+          <textarea id="tone-sample" rows="4" class="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none" placeholder="예: 리뷰 남겨주셔서 감사합니다! 다음에도 맛있게 준비해둘게요 :)"></textarea>
+        </div>
       </div>
       <div class="bg-white rounded-2xl p-6 border border-gray-100">
-        <h2 class="text-lg font-bold text-gray-900 mb-4">자동 응답 설정</h2>
-        <div class="space-y-4">
-          <div class="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
-            <div><div class="font-medium text-sm text-gray-900">자동 승인</div><div class="text-xs text-gray-400">품질 점수 8.0 이상 답변 자동 승인</div></div>
-            <div class="w-12 h-7 bg-brand-500 rounded-full relative cursor-pointer"><div class="w-5 h-5 bg-white rounded-full absolute right-1 top-1 shadow"></div></div>
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-lg font-bold text-gray-900">플랫폼 연결</h2>
+            <p class="text-sm text-gray-500 mt-1">경쟁업체와 같은 방식으로 플랫폼 운영 계정을 연동하면 서버가 리뷰 수집과 답변 등록을 자동화합니다.</p>
           </div>
-          <div class="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
-            <div><div class="font-medium text-sm text-gray-900">자동 게시</div><div class="text-xs text-gray-400">승인된 답변 자동으로 플랫폼에 등록</div></div>
-            <div class="w-12 h-7 bg-gray-300 rounded-full relative cursor-pointer"><div class="w-5 h-5 bg-white rounded-full absolute left-1 top-1 shadow"></div></div>
+          <button onclick="loadConnections()" class="border border-gray-200 text-gray-600 px-4 py-2 rounded-xl text-sm hover:bg-gray-50 transition">
+            상태 새로고침
+          </button>
+        </div>
+        <div id="platform-connection-list" class="space-y-4">
+          ${[
+            ['baemin', '배달의민족', '#00C4B4', '배민 인증 시작', '배민은 최초 1회 직접 인증 후 서버가 운영 세션을 재사용합니다.'],
+            ['coupang_eats', '쿠팡이츠', '#E4002B', '쿠팡이츠 인증 시작', '쿠팡이츠도 직접 인증 세션 방식으로 연결하며, 차단되면 상태에 바로 표시됩니다.'],
+            ['yogiyo', '요기요', '#FA0050', '요기요 인증 시작', '요기요도 직접 인증 후 서버가 운영 세션을 재사용합니다.']
+          ].map(([platform, label, color, startLabel, helper]) => `
+            <div class="border border-gray-200 rounded-2xl p-5">
+              <div class="flex items-center justify-between mb-4">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 rounded-full text-white text-xs font-bold flex items-center justify-center" style="background:${color}">${String(label).slice(0, 2)}</div>
+                  <div>
+                    <div class="font-semibold text-gray-900">${label}</div>
+                    <div class="text-xs text-gray-400">${helper}</div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">미연결</span>
+                  <span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">상태 확인 중</span>
+                </div>
+              </div>
+              <div class="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                <span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">연결 방식: 최초 1회 직접 인증 + 서버 세션 재사용</span>
+                <span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">페이지 진입 직후 상태 동기화</span>
+              </div>
+              <div class="grid md:grid-cols-[1fr_auto] gap-3 mb-4">
+                <input id="${platform}-store-id" type="text" value="" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">
+                <button onclick="startRemotePlatformAuth('${platform}')" class="bg-brand-500 text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition whitespace-nowrap">${startLabel}</button>
+              </div>
+              <div class="flex flex-wrap items-center gap-3">
+                <button id="${platform}-refresh-btn" onclick="loadConnections()" class="border border-brand-200 text-brand-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-brand-50 transition">상태 새로고침</button>
+                <button id="${platform}-disconnect-btn" onclick="disconnectPlatform('${platform}')" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">연결 해제</button>
+                <span class="text-xs text-gray-400">최근 정보: 불러오는 중</span>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      <button onclick="saveStoreSettings()" class="bg-brand-500 text-white px-8 py-3 rounded-xl font-semibold hover:bg-brand-600 transition">설정 저장</button>
+    </div>
+  </main>
+  <script>
+    ensureAuthenticated();
+
+    const platformMeta = {
+      baemin: {
+        label: '배달의민족',
+        color: '#00C4B4',
+        startLabel: '배민 인증 시작',
+        helper: '배민은 최초 1회 직접 인증으로 네이버 추가 인증/CAPTCHA를 직접 해결한 뒤, 연결된 운영 세션을 재사용합니다.',
+        connectedHelper: '배민은 최초 1회 직접 인증 후 서버가 해당 운영 세션을 재사용합니다. 세션이 만료되면 다시 인증하면 됩니다.'
+      },
+      coupang_eats: {
+        label: '쿠팡이츠',
+        color: '#E4002B',
+        startLabel: '쿠팡이츠 인증 시작',
+        helper: '쿠팡이츠도 최초 1회 직접 인증 + 서버 세션 재사용 방식으로 연결합니다. 현재 서버 환경 차단이 발생하면 다른 IP 또는 실행 환경이 필요할 수 있습니다.',
+        connectedHelper: '쿠팡이츠는 직접 인증이 완료되면 서버가 운영 세션을 재사용합니다. 차단이 다시 발생하면 재인증 또는 다른 실행 환경이 필요할 수 있습니다.'
+      },
+      yogiyo: {
+        label: '요기요',
+        color: '#FA0050',
+        startLabel: '요기요 인증 시작',
+        helper: '요기요도 최초 1회 직접 인증 후 서버가 운영 세션을 재사용합니다. 로그인 후 운영 화면이나 리뷰 화면이 열리면 인증 완료 처리하면 됩니다.',
+        connectedHelper: '요기요는 직접 인증 완료 후 저장된 운영 세션으로 리뷰 수집과 등록을 이어갑니다.'
+      }
+    };
+
+    function showSettingsAlert(message, tone) {
+      const el = document.getElementById('settings-alert');
+      const styles = tone === 'error'
+        ? 'border-red-200 bg-red-50 text-red-700'
+        : tone === 'success'
+          ? 'border-green-200 bg-green-50 text-green-700'
+          : 'border-blue-200 bg-blue-50 text-blue-700';
+      el.className = 'max-w-4xl mb-6 rounded-2xl border px-5 py-4 text-sm ' + styles;
+      el.textContent = message;
+      el.classList.remove('hidden');
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function setPlatformActionLoading(platform, action, isLoading) {
+      const button = document.getElementById(platform + '-' + action + '-btn');
+      if (!button) return;
+
+      if (isLoading) {
+        button.disabled = true;
+        button.dataset.originalText = button.textContent || '';
+        button.classList.add('opacity-70', 'cursor-not-allowed');
+        const labels = {
+          connect: '연결 중...',
+          disconnect: '해제 중...',
+          refresh: '갱신 중...'
+        };
+        button.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>' + (labels[action] || '처리 중...');
+        return;
+      }
+
+      button.disabled = false;
+      button.classList.remove('opacity-70', 'cursor-not-allowed');
+      const defaultLabels = {
+        connect: '계정 연결',
+        disconnect: '연결 해제',
+        refresh: '세션 갱신'
+      };
+      button.textContent = button.dataset.originalText || defaultLabels[action] || '확인';
+    }
+
+    function setReplyStyle(style) {
+      const radio = document.querySelector('input[name="style"][value="' + style + '"]');
+      if (radio) radio.checked = true;
+    }
+
+    function getSessionStatusLabel(connection) {
+      const status = connection?.session_status || 'inactive';
+      if (status === 'connected') return '<span class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">세션 활성</span>';
+      if (status === 'pending') return '<span class="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full">세션 대기</span>';
+      if (status === 'error') return '<span class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">세션 오류</span>';
+      if (status === 'expired') return '<span class="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full">세션 만료</span>';
+      return '<span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">세션 없음</span>';
+    }
+
+    function getConnectionByPlatform(platform) {
+      return platformConnections.find(item => item.platform === platform) || null;
+    }
+
+    async function loadStoreSettings() {
+      const response = await apiFetch('/api/v1/store/settings');
+      const data = await readJsonResponse(response);
+      if (!response.ok || data.error) {
+        throw new Error(data?.error?.message || '매장 설정을 불러오지 못했습니다.');
+      }
+
+      const store = data.store || {};
+      document.getElementById('store-name').value = store.store_name || '';
+      document.getElementById('business-number').value = store.business_number_masked || '';
+      document.getElementById('tone-sample').value = store.reply_tone_sample || '';
+      setReplyStyle(store.reply_style || 'friendly');
+    }
+
+    function renderConnections(connections) {
+      const container = document.getElementById('platform-connection-list');
+      container.innerHTML = Object.entries(platformMeta).map(([platform, meta]) => {
+        const connection = (connections || []).find(item => item.platform === platform) || {};
+        const status = connection.connection_status || 'disconnected';
+        const statusBadge = status === 'connected'
+          ? '<span class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">연결됨</span>'
+          : status === 'error'
+            ? '<span class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">오류</span>'
+            : '<span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">미연결</span>';
+        const helperText = connection.last_error
+          ? connection.last_error
+          : connection.session_status === 'connected'
+            ? (meta.connectedHelper || meta.helper)
+            : meta.helper;
+        const startButtonLabel = connection.session_status === 'connected' ? '다시 인증 시작' : meta.startLabel;
+        return '<div class="border border-gray-200 rounded-2xl p-5">'
+          + '<div class="flex items-center justify-between mb-4"><div class="flex items-center gap-3">'
+          + '<div class="w-10 h-10 rounded-full text-white text-xs font-bold flex items-center justify-center" style="background:' + meta.color + '">' + meta.label.slice(0, 2) + '</div>'
+          + '<div><div class="font-semibold text-gray-900">' + meta.label + '</div><div class="text-xs text-gray-400">' + helperText + '</div></div></div>'
+          + '<div class="flex items-center gap-2">' + statusBadge + getSessionStatusLabel(connection) + '</div></div>'
+          + '<div class="mb-4 flex flex-wrap items-center gap-2 text-xs text-gray-500">'
+          + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">연결 방식: 최초 1회 직접 인증 + 서버 세션 재사용</span>'
+          + '<span class="bg-gray-100 text-gray-700 px-2 py-1 rounded-full">최근 세션 확인: ' + (connection.session_last_validated_at ? new Date(connection.session_last_validated_at).toLocaleString('ko-KR') : '-') + '</span>'
+          + '</div>'
+          + '<div class="grid md:grid-cols-[1fr_auto] gap-3 mb-4">'
+          + '<input id="' + platform + '-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
+          + '<button onclick="startRemotePlatformAuth(\\'' + platform + '\\')" class="bg-brand-500 text-white px-5 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition whitespace-nowrap">' + startButtonLabel + '</button>'
+          + '</div>'
+          + '<div class="flex flex-wrap items-center gap-3">'
+          + '<button id="' + platform + '-refresh-btn" onclick="refreshPlatformSession(\\'' + platform + '\\')" class="border border-brand-200 text-brand-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-brand-50 transition">세션 갱신</button>'
+          + '<button id="' + platform + '-disconnect-btn" onclick="disconnectPlatform(\\'' + platform + '\\')" class="border border-gray-200 text-gray-600 px-4 py-2.5 rounded-xl text-sm font-medium hover:bg-gray-50 transition">연결 해제</button>'
+          + '<span class="text-xs text-gray-400">마지막 동기화: ' + (connection.last_sync_at ? new Date(connection.last_sync_at).toLocaleString('ko-KR') : '-') + '</span>'
+          + '</div></div>';
+      }).join('');
+    }
+
+    async function loadConnections() {
+      const response = await apiFetch('/api/v1/platform_connections');
+      const data = await readJsonResponse(response);
+      if (!response.ok || data.error) {
+        throw new Error(data?.error?.message || '플랫폼 연결 상태를 불러오지 못했습니다.');
+      }
+
+      platformConnections = data.connections || [];
+      renderConnections(platformConnections);
+    }
+
+    async function saveStoreSettings() {
+      const selectedStyle = document.querySelector('input[name="style"]:checked');
+      const payload = {
+        store_name: document.getElementById('store-name').value.trim(),
+        business_number_masked: document.getElementById('business-number').value.trim(),
+        reply_style: selectedStyle ? selectedStyle.value : 'friendly',
+        reply_tone_sample: document.getElementById('tone-sample').value.trim()
+      };
+
+      try {
+        const response = await apiFetch('/api/v1/store/settings', {
+          method: 'PATCH',
+          body: JSON.stringify(payload)
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showSettingsAlert(data?.error?.message || '설정 저장에 실패했습니다.', 'error');
+          return;
+        }
+
+        showSettingsAlert('매장 설정이 저장되었습니다.', 'success');
+      } catch (error) {
+        showSettingsAlert('설정 저장 실패: ' + error.message, 'error');
+      }
+    }
+
+    async function connectPlatform(platform) {
+      const existingConnection = getConnectionByPlatform(platform);
+      const loginEmail = document.getElementById(platform + '-email').value.trim();
+      const loginPassword = document.getElementById(platform + '-password').value;
+      const platformStoreId = document.getElementById(platform + '-store-id').value.trim();
+
+      if (!loginEmail && !existingConnection?.login_email) {
+        showSettingsAlert('최초 연결 시에는 플랫폼 로그인 이메일을 입력해주세요.', 'error');
+        return;
+      }
+
+      if (!loginPassword && !existingConnection?.has_credentials) {
+        showSettingsAlert('최초 연결 시에는 플랫폼 비밀번호 입력이 필요합니다.', 'error');
+        return;
+      }
+
+      if (!loginPassword && existingConnection?.has_credentials) {
+        showSettingsAlert(platformMeta[platform].label + ' 저장된 연결로 세션을 다시 확인합니다. 비밀번호를 바꿨다면 새 비밀번호를 입력한 뒤 다시 시도해주세요.', 'info');
+      }
+
+      if (!loginPassword && loginEmail && existingConnection?.login_email && loginEmail !== existingConnection.login_email) {
+        showSettingsAlert('로그인 이메일을 바꾸려면 비밀번호를 다시 입력해주세요.', 'error');
+        return;
+      }
+
+      setPlatformActionLoading(platform, 'connect', true);
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/connect', {
+          method: 'POST',
+          body: JSON.stringify({
+            login_email: loginEmail,
+            login_password: loginPassword,
+            platform_store_id: platformStoreId || null
+          })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error || !data.success) {
+          showSettingsAlert(data?.message || data?.error?.message || '플랫폼 연결에 실패했습니다.', 'error');
+          await loadConnections();
+          return;
+        }
+
+        showSettingsAlert(platformMeta[platform].label + ' 계정 연결과 세션 확인이 완료되었습니다.', 'success');
+        await loadConnections();
+      } catch (error) {
+        showSettingsAlert('플랫폼 연결 실패: ' + error.message, 'error');
+      } finally {
+        setPlatformActionLoading(platform, 'connect', false);
+      }
+    }
+
+    function startRemotePlatformAuth(platform) {
+      const platformStoreId = document.getElementById(platform + '-store-id')?.value?.trim() || '';
+      const target = new URL('/platform-auth/' + platform, window.location.origin);
+      if (platformStoreId) {
+        target.searchParams.set('platform_store_id', platformStoreId);
+      }
+      target.searchParams.set('return_to', '/settings');
+      window.location.href = target.toString();
+    }
+
+    async function refreshPlatformSession(platform) {
+      const connection = getConnectionByPlatform(platform);
+      if (!connection) {
+        showSettingsAlert('먼저 최초 인증을 완료해주세요.', 'error');
+        return;
+      }
+
+      setPlatformActionLoading(platform, 'refresh', true);
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/refresh-session', {
+          method: 'POST'
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error || !data.success) {
+          showSettingsAlert(data?.message || data?.error?.message || '플랫폼 세션 갱신에 실패했습니다.', 'error');
+          await loadConnections();
+          return;
+        }
+
+        showSettingsAlert(platformMeta[platform].label + ' 세션 상태를 다시 확인했습니다.', 'success');
+        await loadConnections();
+      } catch (error) {
+        showSettingsAlert('플랫폼 세션 갱신 실패: ' + error.message, 'error');
+      } finally {
+        setPlatformActionLoading(platform, 'refresh', false);
+      }
+    }
+
+    async function disconnectPlatform(platform) {
+      setPlatformActionLoading(platform, 'disconnect', true);
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/disconnect', {
+          method: 'POST'
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showSettingsAlert(data?.error?.message || '플랫폼 연결 해제에 실패했습니다.', 'error');
+          return;
+        }
+
+        showSettingsAlert(platformMeta[platform].label + ' 연결을 해제했습니다.', 'success');
+        await loadConnections();
+      } catch (error) {
+        showSettingsAlert('플랫폼 연결 해제 실패: ' + error.message, 'error');
+      } finally {
+        setPlatformActionLoading(platform, 'disconnect', false);
+      }
+    }
+
+    Promise.all([loadStoreSettings(), loadConnections()]).catch(error => {
+      showSettingsAlert(error.message, 'error');
+    });
+  </script>
+</body>
+</html>`
+}
+
+function platformRemoteAuthPage(platform: string) {
+  const meta = {
+    baemin: {
+      label: '배달의민족',
+      color: '#00C4B4',
+      hint: '네이버 로그인과 추가 인증, CAPTCHA가 보이면 이 화면에서 직접 해결해주세요. 로그인 후 배민 운영 화면이 열리면 인증 완료를 누르면 됩니다.'
+    },
+    coupang_eats: {
+      label: '쿠팡이츠',
+      color: '#E4002B',
+      hint: '쿠팡이츠는 현재 실행 환경 차단 가능성이 높습니다. 페이지가 차단되면 다른 환경 대응이 필요합니다.'
+    },
+    yogiyo: {
+      label: '요기요',
+      color: '#FA0050',
+      hint: '요기요 로그인 후 운영 화면이나 리뷰 화면이 열리면 인증 완료를 누르면 됩니다.'
+    }
+  }[platform as 'baemin' | 'coupang_eats' | 'yogiyo'] || {
+    label: platform,
+    color: '#64748B',
+    hint: '로그인과 추가 인증을 진행한 뒤 인증 완료를 눌러주세요.'
+  };
+
+  return `${baseHead(meta.label + ' 인증', `
+  <style>
+    .remote-auth-shell { --remote-auth-zoom: 2.05; }
+    .remote-auth-canvas {
+      position: relative;
+      overflow: auto;
+      max-height: calc(100vh - 240px);
+      min-height: 920px;
+      background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%);
+      border-radius: 1.5rem;
+      border: 1px solid #E2E8F0;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    }
+    .remote-auth-screenshot {
+      width: calc(100% * var(--remote-auth-zoom));
+      max-width: none;
+      display: block;
+      background: white;
+      image-rendering: auto;
+    }
+    .remote-auth-loading-stage {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+      background:
+        radial-gradient(circle at top left, rgba(249, 115, 22, 0.12), transparent 30%),
+        radial-gradient(circle at bottom right, rgba(59, 130, 246, 0.12), transparent 36%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.96));
+      z-index: 1;
+      transition: opacity 0.16s ease, visibility 0.16s ease;
+    }
+    .remote-auth-loading-stage.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+    .remote-auth-loading-card {
+      width: min(560px, 100%);
+      border-radius: 1.5rem;
+      border: 1px solid #E2E8F0;
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 24px 60px rgba(15, 23, 42, 0.1);
+      padding: 1.5rem;
+      backdrop-filter: blur(10px);
+    }
+    .remote-auth-loading-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      padding: 0.55rem 0.85rem;
+      border-radius: 9999px;
+      background: #FFF7ED;
+      color: #C2410C;
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+    .remote-auth-loading-spinner {
+      width: 0.95rem;
+      height: 0.95rem;
+      border-radius: 9999px;
+      border: 2px solid rgba(249, 115, 22, 0.22);
+      border-top-color: #F97316;
+      animation: remote-auth-spin 0.75s linear infinite;
+    }
+    .remote-auth-loading-title {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: #0F172A;
+      margin-top: 1rem;
+    }
+    .remote-auth-loading-message {
+      margin-top: 0.65rem;
+      color: #475569;
+      font-size: 0.95rem;
+      line-height: 1.65;
+    }
+    .remote-auth-loading-steps {
+      margin-top: 1rem;
+      display: grid;
+      gap: 0.75rem;
+    }
+    .remote-auth-loading-step {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.8rem 0.9rem;
+      border-radius: 1rem;
+      background: #F8FAFC;
+      color: #475569;
+      font-size: 0.9rem;
+    }
+    .remote-auth-loading-step strong {
+      color: #0F172A;
+      font-weight: 700;
+    }
+    @keyframes remote-auth-spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .remote-auth-click-indicator {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 28px;
+      height: 28px;
+      margin-left: -14px;
+      margin-top: -14px;
+      border-radius: 9999px;
+      border: 2px solid rgba(34, 197, 94, 0.9);
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 0 0 8px rgba(34, 197, 94, 0.18), 0 10px 24px rgba(15, 23, 42, 0.12);
+      pointer-events: none;
+      opacity: 0;
+      transform: scale(0.72);
+      transition: opacity 0.08s ease, transform 0.08s ease, box-shadow 0.14s ease;
+      z-index: 2;
+    }
+    .remote-auth-click-indicator.visible {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .remote-auth-click-indicator.typing {
+      border-color: rgba(22, 163, 74, 0.96);
+      box-shadow: 0 0 0 10px rgba(22, 163, 74, 0.16), 0 14px 28px rgba(22, 163, 74, 0.12);
+    }
+    .remote-auth-click-indicator::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 2px;
+      height: 18px;
+      border-radius: 9999px;
+      background: #16A34A;
+      transform: translate(-50%, -50%);
+      animation: remote-auth-caret-blink 0.95s step-end infinite;
+    }
+    @keyframes remote-auth-caret-blink {
+      0%, 45% { opacity: 1; }
+      46%, 100% { opacity: 0.16; }
+    }
+    .remote-auth-browser-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.85rem;
+      padding: 0.95rem 1rem;
+      border: 1px solid #E2E8F0;
+      border-bottom: none;
+      border-radius: 1.5rem 1.5rem 0 0;
+      background: linear-gradient(180deg, #FFFFFF 0%, #F8FAFC 100%);
+    }
+    .remote-auth-browser-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      flex-shrink: 0;
+    }
+    .remote-auth-browser-dots span {
+      width: 11px;
+      height: 11px;
+      border-radius: 9999px;
+      display: inline-block;
+    }
+    .remote-auth-browser-dots span:nth-child(1) { background: #F87171; }
+    .remote-auth-browser-dots span:nth-child(2) { background: #FBBF24; }
+    .remote-auth-browser-dots span:nth-child(3) { background: #34D399; }
+    .remote-auth-browser-url {
+      min-height: 48px;
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      padding: 0 1rem;
+      border-radius: 9999px;
+      border: 1px solid #E2E8F0;
+      background: white;
+      color: #475569;
+      font-size: 0.95rem;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+    }
+    .remote-auth-browser-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      flex-shrink: 0;
+    }
+    .remote-auth-toolbar-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.45rem;
+      min-height: 48px;
+      border-radius: 0.9rem;
+      border: 1px solid #E2E8F0;
+      background: white;
+      color: #334155;
+      font-size: 0.94rem;
+      font-weight: 600;
+      transition: all 0.18s ease;
+    }
+    .remote-auth-toolbar-btn:hover {
+      background: #F8FAFC;
+      border-color: #CBD5E1;
+    }
+    .remote-auth-toolbar-btn.primary {
+      background: #F97316;
+      color: white;
+      border-color: #F97316;
+    }
+    .remote-auth-toolbar-btn.primary:hover {
+      background: #EA580C;
+      border-color: #EA580C;
+    }
+    .remote-auth-bottom-tools {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .remote-auth-inline-card {
+      border: 1px solid #E2E8F0;
+      background: white;
+      border-radius: 1.35rem;
+      padding: 1rem;
+      box-shadow: 0 8px 26px rgba(15, 23, 42, 0.05);
+    }
+    .remote-auth-toolset {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .remote-auth-toolset .remote-auth-toolbar-btn {
+      min-width: 118px;
+      padding: 0 1rem;
+    }
+    .remote-auth-focus-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      min-height: 44px;
+      padding: 0 0.95rem;
+      border-radius: 9999px;
+      border: 1px solid #E2E8F0;
+      background: #F8FAFC;
+      color: #475569;
+      font-size: 0.85rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .remote-auth-focus-pill.ready {
+      background: #ECFDF5;
+      border-color: #86EFAC;
+      color: #15803D;
+    }
+    .remote-auth-hidden-input {
+      position: fixed;
+      left: 1.25rem;
+      bottom: 1.25rem;
+      width: 2px;
+      height: 2px;
+      opacity: 0.01;
+      pointer-events: none;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      background: transparent;
+      color: transparent;
+      caret-color: transparent;
+    }
+    .remote-auth-side-panel {
+      position: sticky;
+      top: 1.5rem;
+    }
+    @media (max-width: 1279px) {
+      .remote-auth-side-panel {
+        position: static;
+      }
+    }
+    @media (max-width: 768px) {
+      .remote-auth-shell { --remote-auth-zoom: 1.55; }
+      .remote-auth-browser-bar {
+        flex-wrap: wrap;
+      }
+      .remote-auth-browser-actions {
+        width: 100%;
+        justify-content: stretch;
+      }
+      .remote-auth-browser-actions button {
+        flex: 1;
+      }
+      .remote-auth-canvas {
+        min-height: 720px;
+        max-height: calc(100vh - 220px);
+      }
+      .remote-auth-toolset {
+        width: 100%;
+      }
+      .remote-auth-toolset .remote-auth-toolbar-btn {
+        flex: 1 1 calc(50% - 0.75rem);
+        min-width: 0;
+      }
+    }
+  </style>
+  `)}
+<body class="bg-gray-50 min-h-screen">
+  ${userSidebar('settings', false)}
+  <main class="ml-[72px] min-h-screen p-5 xl:p-6">
+    <div class="max-w-[1820px] mx-auto remote-auth-shell">
+      <div class="mb-6 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <a href="/settings" class="inline-flex items-center gap-2 text-sm text-brand-600 hover:text-brand-700 mb-3">
+            <i class="fas fa-arrow-left"></i>
+            설정으로 돌아가기
+          </a>
+          <div class="flex items-center gap-3 mb-3">
+            <div class="w-12 h-12 rounded-2xl text-white text-sm font-bold flex items-center justify-center" style="background:${meta.color}">${meta.label.slice(0, 2)}</div>
+            <div>
+              <h1 class="text-2xl font-bold text-gray-900">${meta.label} 원격 인증</h1>
+              <p class="text-sm text-gray-500 mt-1">웹앱 안에서 서버 브라우저 화면을 원격 조작해 최초 1회 인증을 완료합니다.</p>
+            </div>
+          </div>
+          <div class="rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4 text-sm text-blue-700 max-w-3xl">
+            ${meta.hint}
+          </div>
+        </div>
+        <div class="bg-white border border-gray-100 rounded-2xl p-4 w-full lg:w-[320px] shadow-sm">
+          <div class="text-xs uppercase tracking-[0.24em] text-gray-400 mb-2">인증 상태</div>
+          <div id="remote-auth-status-pill" class="inline-flex items-center gap-2 text-xs bg-gray-100 text-gray-700 px-3 py-2 rounded-full">준비중</div>
+          <div id="remote-auth-message" class="text-sm text-gray-600 mt-3 leading-6">원격 브라우저 세션을 준비하는 중입니다.</div>
+          <div class="mt-4 text-xs text-gray-500 space-y-2">
+            <div>현재 주소</div>
+            <div id="remote-auth-current-url" class="break-all text-gray-700"></div>
+            <div class="pt-2">페이지 제목</div>
+            <div id="remote-auth-title" class="break-all text-gray-700"></div>
           </div>
         </div>
       </div>
-      <button class="bg-brand-500 text-white px-8 py-3 rounded-xl font-semibold hover:bg-brand-600 transition">설정 저장</button>
+
+      <div id="remote-auth-alert" class="hidden rounded-2xl border px-5 py-4 text-sm mb-6"></div>
+
+      <div class="grid xl:grid-cols-[minmax(0,1.45fr)_360px] gap-6 items-start">
+        <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
+          <div class="flex items-center justify-between gap-3 mb-4">
+            <div>
+              <div class="text-sm font-semibold text-gray-900">원격 브라우저 화면</div>
+              <div class="text-xs text-gray-400 mt-1">실제 브라우저처럼 화면을 크게 보고, 필요한 입력과 이동은 바로 아래 툴바에서 이어서 진행하세요.</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button onclick="adjustRemoteAuthZoom(-0.15)" class="remote-auth-toolbar-btn px-3">축소</button>
+              <div id="remote-auth-zoom-label" class="text-xs font-semibold text-gray-500 min-w-[60px] text-center">170%</div>
+              <button onclick="adjustRemoteAuthZoom(0.15)" class="remote-auth-toolbar-btn px-3">확대</button>
+              <button onclick="resetRemoteAuthZoom()" class="remote-auth-toolbar-btn px-3">기본값</button>
+            </div>
+          </div>
+
+          <div class="remote-auth-browser-bar">
+            <div class="remote-auth-browser-dots">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <div id="remote-auth-toolbar-url" class="remote-auth-browser-url">원격 브라우저 준비 중...</div>
+            <div class="remote-auth-browser-actions">
+              <button onclick="manualRefreshRemoteAuth()" class="remote-auth-toolbar-btn px-4">새로고침</button>
+              <button onclick="cancelRemoteAuth()" class="remote-auth-toolbar-btn px-4 text-red-600 border-red-200 hover:bg-red-50">인증 종료</button>
+            </div>
+          </div>
+
+          <div class="remote-auth-canvas">
+            <img id="remote-auth-screenshot" alt="${meta.label} 인증 화면" class="remote-auth-screenshot cursor-crosshair select-none" />
+            <div id="remote-auth-loading-stage" class="remote-auth-loading-stage">
+              <div class="remote-auth-loading-card">
+                <div class="remote-auth-loading-badge">
+                  <span class="remote-auth-loading-spinner"></span>
+                  원격 브라우저 준비 중
+                </div>
+                <div class="remote-auth-loading-title">${meta.label} 인증 화면을 바로 여는 중입니다</div>
+                <div id="remote-auth-loading-message" class="remote-auth-loading-message">페이지는 이미 열렸고, 지금 서버 브라우저를 깨운 뒤 첫 화면을 가져오고 있습니다. 보이는 즉시 바로 클릭하고 입력할 수 있게 준비합니다.</div>
+                <div class="remote-auth-loading-steps">
+                  <div class="remote-auth-loading-step"><strong>1.</strong><span>원격 브라우저 세션 생성</span></div>
+                  <div class="remote-auth-loading-step"><strong>2.</strong><span>로그인 페이지 진입</span></div>
+                  <div class="remote-auth-loading-step"><strong>3.</strong><span>첫 화면 스냅샷 로드 후 바로 조작 가능</span></div>
+                </div>
+              </div>
+            </div>
+            <div id="remote-auth-click-indicator" class="remote-auth-click-indicator" aria-hidden="true"></div>
+          </div>
+
+          <div class="mt-3 text-xs text-gray-500 flex flex-wrap items-center gap-3">
+            <span id="remote-auth-resolution">해상도 확인 중...</span>
+            <span id="remote-auth-session-id" class="break-all"></span>
+          </div>
+
+          <input id="remote-auth-capture-input" type="text" class="remote-auth-hidden-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" />
+          <div class="remote-auth-bottom-tools">
+            <section class="remote-auth-inline-card flex-1 min-w-[320px]">
+              <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <div class="text-sm font-semibold text-gray-900">직접 입력 모드</div>
+                  <div class="text-xs text-gray-500 mt-1 leading-5">화면 안 입력칸을 클릭하면 바로 타이핑, 한글 입력, 붙여넣기가 됩니다. 마우스 휠로 스크롤도 바로 할 수 있어요.</div>
+                </div>
+                <div id="remote-auth-focus-pill" class="remote-auth-focus-pill">입력 대상 선택 전</div>
+              </div>
+            </section>
+            <div class="remote-auth-toolset">
+              <button onclick="sendRemoteAuthKey('Backspace')" class="remote-auth-toolbar-btn">Backspace</button>
+              <button onclick="sendRemoteAuthKey('Tab')" class="remote-auth-toolbar-btn">Tab</button>
+              <button onclick="sendRemoteAuthKey('Enter')" class="remote-auth-toolbar-btn">Enter</button>
+              <button onclick="sendRemoteAuthAction({ action: 'reload' }, { refresh: 'deferred', delay: 120 })" class="remote-auth-toolbar-btn">새로고침</button>
+              <button onclick="sendRemoteAuthAction({ action: 'back' }, { refresh: 'deferred', delay: 120 })" class="remote-auth-toolbar-btn">뒤로가기</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: -520 }, { refresh: 'deferred', delay: 75 })" class="remote-auth-toolbar-btn">위로 스크롤</button>
+              <button onclick="sendRemoteAuthAction({ action: 'scroll', deltaY: 520 }, { refresh: 'deferred', delay: 75 })" class="remote-auth-toolbar-btn">아래로 스크롤</button>
+              <button onclick="waitRemoteAuth(1800)" class="remote-auth-toolbar-btn">잠시 대기</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="space-y-6 remote-auth-side-panel">
+          <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
+            <div class="text-sm font-semibold text-gray-900 mb-2">완료 처리</div>
+            <p class="text-xs text-gray-500 leading-6 mb-4">배민 운영 화면까지 진입했거나, 더 이상 네이버 인증/CAPTCHA 단계가 아닌 상태라면 아래 버튼으로 세션을 연결 완료 처리하세요.</p>
+            <div class="space-y-3">
+              <button id="remote-auth-complete-btn" onclick="completeRemoteAuth()" class="w-full bg-green-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-green-600 transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>인증 완료 후 설정으로 돌아가기</button>
+              <button onclick="window.location.href='/reviews'" class="w-full border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">리뷰 관리로 이동</button>
+            </div>
+          </section>
+        </aside>
+      </div>
     </div>
   </main>
+  <script>
+    ensureAuthenticated();
+
+    const remotePlatform = ${JSON.stringify(platform)};
+    const remoteReturnTo = resolveSafeNextPath(new URLSearchParams(window.location.search).get('return_to')) || '/settings';
+    const initialPlatformStoreId = new URLSearchParams(window.location.search).get('platform_store_id') || '';
+    let remoteAuthSessionId = '';
+    let remoteAuthSnapshot = null;
+    let remoteAuthPollTimer = null;
+    let remoteAuthScreenshotObjectUrl = null;
+    let remoteAuthRefreshTimer = null;
+    let remoteAuthRefreshInFlight = null;
+    let remoteAuthHasVisibleScreenshot = false;
+    let remoteAuthActionChain = Promise.resolve();
+    let remoteAuthComposing = false;
+    let remoteAuthTextFlushTimer = null;
+    let remoteAuthTextFlushInFlight = false;
+    let remoteAuthScrollFlushTimer = null;
+    let remoteAuthQueuedScrollDelta = 0;
+    let remoteAuthClickIndicatorTimer = null;
+    let remoteAuthLastClickPoint = null;
+    let remoteAuthLastOptimisticFocusAt = 0;
+    let remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
+
+    function extractRemoteAuthSnapshot(payload) {
+      if (!payload || typeof payload !== 'object') {
+        return null;
+      }
+
+      if (payload.snapshot && typeof payload.snapshot === 'object') {
+        return payload.snapshot;
+      }
+
+      if (payload.remote_auth && typeof payload.remote_auth === 'object') {
+        if (payload.remote_auth.snapshot && typeof payload.remote_auth.snapshot === 'object') {
+          return payload.remote_auth.snapshot;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(payload.remote_auth, 'status')) {
+          return payload.remote_auth;
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(payload, 'status')) {
+        return payload;
+      }
+
+      return null;
+    }
+
+    function showRemoteAuthAlert(message, tone) {
+      const el = document.getElementById('remote-auth-alert');
+      const styles = tone === 'error'
+        ? 'border-red-200 bg-red-50 text-red-700'
+        : tone === 'success'
+          ? 'border-green-200 bg-green-50 text-green-700'
+          : 'border-blue-200 bg-blue-50 text-blue-700';
+      el.className = 'rounded-2xl border px-5 py-4 text-sm mb-6 ' + styles;
+      el.textContent = message;
+      el.classList.remove('hidden');
+    }
+
+    function setRemoteAuthLoadingStage(message, hidden = false) {
+      const stage = document.getElementById('remote-auth-loading-stage');
+      const messageEl = document.getElementById('remote-auth-loading-message');
+      if (messageEl && message) {
+        messageEl.textContent = message;
+      }
+      if (!stage) {
+        return;
+      }
+      stage.classList.toggle('hidden', !!hidden);
+    }
+
+    function updateRemoteAuthZoomUi() {
+      const shell = document.querySelector('.remote-auth-shell');
+      const label = document.getElementById('remote-auth-zoom-label');
+      if (shell) {
+        shell.style.setProperty('--remote-auth-zoom', String(remoteAuthZoom));
+      }
+      if (label) {
+        label.textContent = Math.round(remoteAuthZoom * 100) + '%';
+      }
+    }
+
+    function adjustRemoteAuthZoom(delta) {
+      remoteAuthZoom = Math.max(1, Math.min(2.4, Number((remoteAuthZoom + delta).toFixed(2))));
+      updateRemoteAuthZoomUi();
+    }
+
+    function resetRemoteAuthZoom() {
+      remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
+      updateRemoteAuthZoomUi();
+    }
+
+    function updateRemoteAuthFocusPill(message, tone) {
+      const el = document.getElementById('remote-auth-focus-pill');
+      if (!el) return;
+      el.textContent = message;
+      el.classList.toggle('ready', tone === 'ready');
+    }
+
+    function getRemoteAuthPointFromEvent(event) {
+      if (!remoteAuthSnapshot?.viewport || !remoteAuthScreenshotEl) {
+        return null;
+      }
+
+      const rect = remoteAuthScreenshotEl.getBoundingClientRect();
+      if (!rect.width || !rect.height) {
+        return null;
+      }
+
+      const relativeX = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      const relativeY = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+
+      return {
+        relativeX: relativeX,
+        relativeY: relativeY,
+        x: Math.max(1, Math.round(relativeX * remoteAuthSnapshot.viewport.width)),
+        y: Math.max(1, Math.round(relativeY * remoteAuthSnapshot.viewport.height)),
+        canvasX: Math.round((remoteAuthScreenshotEl.offsetLeft || 0) + (relativeX * remoteAuthScreenshotEl.clientWidth)),
+        canvasY: Math.round((remoteAuthScreenshotEl.offsetTop || 0) + (relativeY * remoteAuthScreenshotEl.clientHeight))
+      };
+    }
+
+    function showRemoteAuthClickIndicator(point, typingReady = true) {
+      const el = document.getElementById('remote-auth-click-indicator');
+      if (!el || !point) return;
+
+      el.style.left = point.canvasX + 'px';
+      el.style.top = point.canvasY + 'px';
+      el.classList.add('visible');
+      el.classList.toggle('typing', typingReady);
+
+      if (remoteAuthClickIndicatorTimer) {
+        clearTimeout(remoteAuthClickIndicatorTimer);
+      }
+
+      remoteAuthClickIndicatorTimer = setTimeout(function() {
+        el.classList.remove('visible');
+        el.classList.remove('typing');
+      }, typingReady ? 1400 : 900);
+    }
+
+    function primeRemoteAuthTyping() {
+      focusRemoteAuthCaptureInput();
+      window.requestAnimationFrame(focusRemoteAuthCaptureInput);
+      setTimeout(focusRemoteAuthCaptureInput, 18);
+    }
+
+    function scheduleRemoteAuthRefresh(delay = 80) {
+      if (remoteAuthRefreshTimer) {
+        clearTimeout(remoteAuthRefreshTimer);
+      }
+      remoteAuthRefreshTimer = setTimeout(function() {
+        refreshRemoteAuthStatus().catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      }, delay);
+    }
+
+    function queueRemoteAuthAction(task) {
+      remoteAuthActionChain = remoteAuthActionChain
+        .then(task)
+        .catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      return remoteAuthActionChain;
+    }
+
+    function focusRemoteAuthCaptureInput() {
+      const input = document.getElementById('remote-auth-capture-input');
+      if (!input) return;
+
+      try {
+        input.focus({ preventScroll: true });
+      } catch (error) {
+        input.focus();
+      }
+
+      try {
+        const length = input.value.length;
+        if (typeof input.setSelectionRange === 'function') {
+          input.setSelectionRange(length, length);
+        }
+      } catch (error) {}
+    }
+
+    function scheduleRemoteAuthTextFlush(delay = 4) {
+      if (remoteAuthTextFlushTimer) {
+        clearTimeout(remoteAuthTextFlushTimer);
+      }
+
+      remoteAuthTextFlushTimer = setTimeout(function() {
+        flushRemoteAuthText().catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      }, Math.max(0, delay));
+    }
+
+    async function flushRemoteAuthText() {
+      const input = document.getElementById('remote-auth-capture-input');
+      if (!input || remoteAuthComposing || remoteAuthTextFlushInFlight) {
+        return;
+      }
+
+      const value = input.value;
+      if (!value) {
+        return;
+      }
+
+      remoteAuthTextFlushInFlight = true;
+      input.value = '';
+
+      try {
+        updateRemoteAuthFocusPill('입력 반영 중 · 계속 타이핑 가능', 'ready');
+        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 18 });
+        updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
+        showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+        primeRemoteAuthTyping();
+      } finally {
+        remoteAuthTextFlushInFlight = false;
+        if (input.value) {
+          scheduleRemoteAuthTextFlush(0);
+        }
+      }
+    }
+
+    function normalizeRemoteAuthWheelDelta(event) {
+      const lineHeight = 40;
+      const pageHeight = window.innerHeight || 900;
+      const factor = event.deltaMode === 1 ? lineHeight : event.deltaMode === 2 ? pageHeight : 1;
+      const rawDelta = Number(event.deltaY || 0) * factor;
+      return Math.max(-1400, Math.min(1400, Math.round(rawDelta)));
+    }
+
+    function flushRemoteAuthScroll() {
+      const deltaY = Math.max(-1600, Math.min(1600, Math.round(remoteAuthQueuedScrollDelta)));
+      remoteAuthQueuedScrollDelta = 0;
+      remoteAuthScrollFlushTimer = null;
+
+      if (!deltaY) {
+        return;
+      }
+
+      sendRemoteAuthAction({ action: 'scroll', deltaY: deltaY }, { refresh: 'deferred', delay: 42 }).catch(function(error) {
+        showRemoteAuthAlert(error.message, 'error');
+      });
+    }
+
+    function queueRemoteAuthScroll(deltaY) {
+      remoteAuthQueuedScrollDelta += deltaY;
+      if (remoteAuthScrollFlushTimer) {
+        return;
+      }
+
+      remoteAuthScrollFlushTimer = setTimeout(flushRemoteAuthScroll, 24);
+    }
+
+    function updateRemoteAuthStatus(snapshot) {
+      remoteAuthSnapshot = snapshot || null;
+      const pill = document.getElementById('remote-auth-status-pill');
+      const messageEl = document.getElementById('remote-auth-message');
+      const urlEl = document.getElementById('remote-auth-current-url');
+      const titleEl = document.getElementById('remote-auth-title');
+      const completeButton = document.getElementById('remote-auth-complete-btn');
+      const resolutionEl = document.getElementById('remote-auth-resolution');
+      const sessionIdEl = document.getElementById('remote-auth-session-id');
+      const toolbarUrlEl = document.getElementById('remote-auth-toolbar-url');
+
+      if (!snapshot) {
+        setRemoteAuthLoadingStage('원격 인증 상태를 먼저 확인하고 있습니다. 첫 화면이 도착하면 바로 이 영역에 표시됩니다.', false);
+        pill.className = 'inline-flex items-center gap-2 text-xs bg-gray-100 text-gray-700 px-3 py-2 rounded-full';
+        pill.textContent = '상태 확인 중';
+        messageEl.textContent = '원격 인증 상태를 불러오는 중입니다.';
+        urlEl.textContent = '-';
+        titleEl.textContent = '-';
+        toolbarUrlEl.textContent = '원격 브라우저 준비 중...';
+        completeButton.disabled = true;
+        resolutionEl.textContent = '해상도 확인 중...';
+        sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
+        return;
+      }
+
+      const statusMap = {
+        auth_in_progress: ['bg-yellow-100 text-yellow-700', '인증 진행 중'],
+        needs_user_action: ['bg-orange-100 text-orange-700', '추가 동작 필요'],
+        ready: ['bg-green-100 text-green-700', '완료 가능'],
+        blocked: ['bg-red-100 text-red-700', '차단 감지'],
+        error: ['bg-red-100 text-red-700', '오류'],
+        pending: ['bg-gray-100 text-gray-700', '대기 중']
+      };
+      const statusInfo = statusMap[snapshot.status] || ['bg-gray-100 text-gray-700', snapshot.status || '상태 확인'];
+      pill.className = 'inline-flex items-center gap-2 text-xs px-3 py-2 rounded-full ' + statusInfo[0];
+      pill.textContent = statusInfo[1];
+      messageEl.textContent = snapshot.message || '상태 메시지가 없습니다.';
+      urlEl.textContent = snapshot.current_url || '-';
+      titleEl.textContent = snapshot.title || '-';
+      toolbarUrlEl.textContent = snapshot.current_url || '원격 브라우저 준비 중...';
+      completeButton.disabled = !snapshot.can_complete;
+      resolutionEl.textContent = snapshot.viewport ? ('원격 브라우저 해상도: ' + snapshot.viewport.width + ' x ' + snapshot.viewport.height) : '원격 브라우저 해상도 확인 중';
+      sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
+      if (!remoteAuthHasVisibleScreenshot) {
+        setRemoteAuthLoadingStage(snapshot.message || '로그인 화면을 준비하는 중입니다.', false);
+      }
+    }
+
+    async function refreshRemoteAuthStatus() {
+      if (!remoteAuthSessionId) return;
+      if (remoteAuthRefreshInFlight) {
+        return remoteAuthRefreshInFlight;
+      }
+
+      remoteAuthRefreshInFlight = (async function() {
+        let screenshotError = null;
+        const screenshotPromise = refreshRemoteAuthScreenshot().catch(function(error) {
+          screenshotError = error;
+        });
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/status');
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          throw new Error(data?.error?.message || '원격 인증 상태를 불러오지 못했습니다.');
+        }
+
+        const snapshot = extractRemoteAuthSnapshot(data);
+        updateRemoteAuthStatus(snapshot);
+        await screenshotPromise;
+
+        if (screenshotError && snapshot?.status !== 'closed') {
+          throw screenshotError;
+        }
+      })().finally(function() {
+        remoteAuthRefreshInFlight = null;
+      });
+
+      return remoteAuthRefreshInFlight;
+    }
+
+    async function refreshRemoteAuthScreenshot() {
+      if (!remoteAuthSessionId) return;
+      const image = document.getElementById('remote-auth-screenshot');
+      const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/screenshot?ts=' + Date.now());
+
+      if (!response.ok) {
+        let errorMessage = '원격 인증 화면 이미지를 불러오지 못했습니다.';
+        try {
+          const data = await response.json();
+          errorMessage = data?.error?.message || errorMessage;
+        } catch (error) {
+          const text = await response.text().catch(() => '');
+          if (text) {
+            errorMessage = text;
+          }
+        }
+        throw new Error(errorMessage);
+      }
+
+      const blob = await response.blob();
+      if (remoteAuthScreenshotObjectUrl) {
+        URL.revokeObjectURL(remoteAuthScreenshotObjectUrl);
+      }
+      remoteAuthScreenshotObjectUrl = URL.createObjectURL(blob);
+      await new Promise(function(resolve, reject) {
+        image.onload = function() {
+          remoteAuthHasVisibleScreenshot = true;
+          setRemoteAuthLoadingStage('', true);
+          resolve(null);
+        };
+        image.onerror = function() {
+          reject(new Error('원격 인증 화면을 렌더링하지 못했습니다.'));
+        };
+        image.src = remoteAuthScreenshotObjectUrl;
+      });
+    }
+
+    async function sendRemoteAuthAction(payload, options = {}) {
+      if (!remoteAuthSessionId) return;
+      return queueRemoteAuthAction(async function() {
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/action', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          throw new Error(data?.error?.message || '원격 인증 조작에 실패했습니다.');
+        }
+        const snapshot = extractRemoteAuthSnapshot(data);
+        if (snapshot) {
+          updateRemoteAuthStatus(snapshot);
+        }
+        if (options.refresh === 'deferred') {
+          scheduleRemoteAuthRefresh(options.delay || 80);
+        } else {
+          await refreshRemoteAuthScreenshot();
+        }
+      });
+    }
+
+    async function sendRemoteAuthKey(key) {
+      try {
+        await flushRemoteAuthText();
+        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 18 });
+        updateRemoteAuthFocusPill('특수키 입력 완료', 'ready');
+        primeRemoteAuthTyping();
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function waitRemoteAuth(ms) {
+      try {
+        await sendRemoteAuthAction({ action: 'wait', ms: ms }, { refresh: 'deferred', delay: 56 });
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function manualRefreshRemoteAuth() {
+      try {
+        await refreshRemoteAuthStatus();
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function completeRemoteAuth() {
+      if (!remoteAuthSessionId) return;
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/complete', {
+          method: 'POST'
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showRemoteAuthAlert(data?.error?.message || '원격 인증 완료 처리에 실패했습니다.', 'error');
+          return;
+        }
+        showRemoteAuthAlert('배민 세션이 연결되었습니다. 설정 화면으로 돌아갑니다.', 'success');
+        stopRemoteAuthPolling();
+        setTimeout(function() {
+          window.location.href = remoteReturnTo;
+        }, 600);
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    async function cancelRemoteAuth() {
+      if (!remoteAuthSessionId) {
+        window.location.href = remoteReturnTo;
+        return;
+      }
+      try {
+        await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + remoteAuthSessionId + '/cancel', {
+          method: 'POST'
+        });
+      } catch (error) {}
+      stopRemoteAuthPolling();
+      window.location.href = remoteReturnTo;
+    }
+
+    function stopRemoteAuthPolling() {
+      if (remoteAuthPollTimer) {
+        clearInterval(remoteAuthPollTimer);
+        remoteAuthPollTimer = null;
+      }
+      if (remoteAuthRefreshTimer) {
+        clearTimeout(remoteAuthRefreshTimer);
+        remoteAuthRefreshTimer = null;
+      }
+    }
+
+    function startRemoteAuthPolling() {
+      stopRemoteAuthPolling();
+      remoteAuthPollTimer = setInterval(function() {
+        refreshRemoteAuthStatus().catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      }, 1200);
+    }
+
+    async function startRemoteAuth() {
+      try {
+        setRemoteAuthLoadingStage('원격 브라우저 세션을 만드는 중입니다. 이 단계가 끝나면 로그인 페이지가 바로 표시됩니다.', false);
+        const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            platform_store_id: initialPlatformStoreId || null
+          })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showRemoteAuthAlert(data?.error?.message || '원격 인증 세션을 시작하지 못했습니다.', 'error');
+          return;
+        }
+        remoteAuthSessionId = data.session_id;
+        updateRemoteAuthStatus(extractRemoteAuthSnapshot(data));
+        startRemoteAuthPolling();
+        scheduleRemoteAuthRefresh(60);
+        refreshRemoteAuthScreenshot().catch(function(error) {
+          showRemoteAuthAlert(error.message, 'error');
+        });
+      } catch (error) {
+        showRemoteAuthAlert(error.message, 'error');
+      }
+    }
+
+    const remoteAuthScreenshotEl = document.getElementById('remote-auth-screenshot');
+    const remoteAuthCaptureInputEl = document.getElementById('remote-auth-capture-input');
+
+    remoteAuthScreenshotEl.addEventListener('pointerdown', function(event) {
+      event.preventDefault();
+      const point = getRemoteAuthPointFromEvent(event);
+      if (!point) {
+        return;
+      }
+
+      remoteAuthLastClickPoint = point;
+      remoteAuthLastOptimisticFocusAt = Date.now();
+      showRemoteAuthClickIndicator(point, true);
+      updateRemoteAuthFocusPill('입력칸 활성화 중 · 바로 타이핑하세요', 'ready');
+      primeRemoteAuthTyping();
+
+      sendRemoteAuthAction({ action: 'click', x: point.x, y: point.y }, { refresh: 'deferred', delay: 20 }).then(function() {
+        updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
+      });
+    });
+
+    remoteAuthScreenshotEl.addEventListener('click', function(event) {
+      event.preventDefault();
+      primeRemoteAuthTyping();
+    });
+
+    remoteAuthScreenshotEl.addEventListener('wheel', function(event) {
+      event.preventDefault();
+      queueRemoteAuthScroll(normalizeRemoteAuthWheelDelta(event));
+    }, { passive: false });
+
+    remoteAuthCaptureInputEl.addEventListener('compositionstart', function() {
+      remoteAuthComposing = true;
+      updateRemoteAuthFocusPill('한글 조합 중', 'ready');
+      showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('compositionend', function() {
+      remoteAuthComposing = false;
+      scheduleRemoteAuthTextFlush(0);
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('input', function() {
+      if (remoteAuthComposing) {
+        return;
+      }
+      const immediate = (Date.now() - remoteAuthLastOptimisticFocusAt) < 400;
+      updateRemoteAuthFocusPill('입력 감지됨 · 서버에 바로 반영 중', 'ready');
+      showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+      scheduleRemoteAuthTextFlush(immediate ? 0 : 4);
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('paste', function(event) {
+      const pastedText = event.clipboardData?.getData('text') || '';
+      if (!pastedText) {
+        return;
+      }
+      event.preventDefault();
+      remoteAuthCaptureInputEl.value += pastedText;
+      updateRemoteAuthFocusPill('붙여넣기 반영 중', 'ready');
+      showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+      scheduleRemoteAuthTextFlush(0);
+    });
+
+    remoteAuthCaptureInputEl.addEventListener('keydown', function(event) {
+      if (event.key === 'Backspace' && !remoteAuthCaptureInputEl.value) {
+        event.preventDefault();
+        sendRemoteAuthKey('Backspace');
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        sendRemoteAuthKey('Enter');
+        return;
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        sendRemoteAuthKey('Tab');
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        updateRemoteAuthFocusPill('입력 대상 선택 전', '');
+        remoteAuthCaptureInputEl.blur();
+      }
+    });
+
+    window.addEventListener('beforeunload', stopRemoteAuthPolling);
+
+    updateRemoteAuthStatus(null);
+    updateRemoteAuthFocusPill('입력 대상 선택 전', '');
+    updateRemoteAuthZoomUi();
+    startRemoteAuth();
+  </script>
+</body>
+</html>`
+}
+
+function mobileSessionCenterPage(isAppShell = false) {
+  const cardPaddingClass = isAppShell ? 'p-5' : 'p-6'
+  const gridColsClass = isAppShell ? 'grid-cols-1' : 'md:grid-cols-2'
+  const actionRowClass = isAppShell ? 'flex flex-col gap-3' : 'flex flex-wrap items-center gap-3'
+  const actionButtonWidthClass = isAppShell ? 'w-full' : ''
+
+  return `${baseHead('모바일 세션 센터')}
+<body class="bg-gray-50 min-h-screen">
+  <main class="${isAppShell ? 'max-w-none mx-auto px-4 py-4' : 'max-w-5xl mx-auto px-4 py-8'}">
+    ${isAppShell ? '' : `
+    <div class="mb-6">
+      <a href="/settings" class="text-sm text-brand-600 hover:text-brand-700"><i class="fas fa-arrow-left mr-2"></i>설정으로 돌아가기</a>
+    </div>`}
+    <div class="bg-white border border-gray-100 rounded-3xl p-6 mb-6">
+      <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h1 class="text-2xl font-bold text-gray-900">모바일 직접 로그인 세션 센터</h1>
+          <p class="text-sm text-gray-500 mt-2">${isAppShell
+            ? '앱 전용 직접 로그인 허브입니다. 아래에서 플랫폼을 선택하면 앱이 로그인 WebView를 열고, 로그인 성공 후 세션 상태를 이 화면으로 다시 전달합니다.'
+            : '이 화면은 향후 모바일 앱/WebView 안에서 플랫폼 직접 로그인을 시작하는 허브입니다. 현재 웹 브라우저에서는 브리지 호출만 준비되고, 실제 세션 생성은 모바일 앱 구현이 필요합니다.'}</p>
+        </div>
+        <button onclick="loadConnections()" class="border border-gray-200 text-gray-600 px-4 py-2 rounded-xl text-sm hover:bg-gray-50 transition">상태 새로고침</button>
+      </div>
+    </div>
+    <div id="mobile-session-alert" class="hidden rounded-2xl border px-5 py-4 text-sm mb-6"></div>
+    <div id="mobile-session-list" class="space-y-4">
+      <div class="text-sm text-gray-400">플랫폼 세션 상태를 불러오는 중...</div>
+    </div>
+  </main>
+  <script>
+    ensureAuthenticated();
+
+    const mobilePlatformMeta = {
+      baemin: {
+        label: '배달의민족',
+        color: '#00C4B4',
+        loginUrl: 'https://self.baemin.com/bridge',
+        reviewUrl: 'https://self.baemin.com/'
+      },
+      coupang_eats: {
+        label: '쿠팡이츠',
+        color: '#E4002B',
+        loginUrl: 'https://store.coupangeats.com/login',
+        reviewUrl: 'https://store.coupangeats.com/reviews'
+      },
+      yogiyo: {
+        label: '요기요',
+        color: '#FA0050',
+        loginUrl: 'https://ceo.yogiyo.co.kr/login',
+        reviewUrl: 'https://ceo.yogiyo.co.kr/reviews'
+      }
+    };
+
+    function showMobileSessionAlert(message, tone) {
+      const el = document.getElementById('mobile-session-alert');
+      const styles = tone === 'error'
+        ? 'border-red-200 bg-red-50 text-red-700'
+        : tone === 'success'
+          ? 'border-green-200 bg-green-50 text-green-700'
+          : 'border-blue-200 bg-blue-50 text-blue-700';
+      el.className = 'rounded-2xl border px-5 py-4 text-sm mb-6 ' + styles;
+      el.textContent = message;
+      el.classList.remove('hidden');
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function getSessionBadge(connection) {
+      const status = connection?.session_status || 'inactive';
+      if (status === 'connected') return '<span class="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">세션 활성</span>';
+      if (status === 'pending') return '<span class="text-xs bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full">세션 준비중</span>';
+      if (status === 'error') return '<span class="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full">세션 오류</span>';
+      if (status === 'expired') return '<span class="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full">세션 만료</span>';
+      return '<span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">세션 없음</span>';
+    }
+
+    function sendNativeBridgeMessage(payload) {
+      if (window.RespondioNativeBridge && typeof window.RespondioNativeBridge.postMessage === 'function') {
+        window.RespondioNativeBridge.postMessage(JSON.stringify(payload));
+        return true;
+      }
+
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.respondio) {
+        window.webkit.messageHandlers.respondio.postMessage(payload);
+        return true;
+      }
+
+      if (window.AndroidRespondio && typeof window.AndroidRespondio.postMessage === 'function') {
+        window.AndroidRespondio.postMessage(JSON.stringify(payload));
+        return true;
+      }
+
+      if (window.parent && window.parent !== window && typeof window.parent.postMessage === 'function') {
+        window.parent.postMessage(payload, '*');
+        return true;
+      }
+
+      return false;
+    }
+
+    function renderMobileConnections(connections) {
+      const container = document.getElementById('mobile-session-list');
+      container.innerHTML = Object.entries(mobilePlatformMeta).map(([platform, meta]) => {
+        const connection = (connections || []).find(item => item.platform === platform) || {};
+        const statusText = connection.last_error || '앱에서 바로 로그인하면 세션 준비와 로그인 창 열기가 함께 진행됩니다.';
+        return '<div class="bg-white border border-gray-100 rounded-3xl ${cardPaddingClass} shadow-sm">'
+          + '<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between mb-4">'
+          + '<div class="flex items-center gap-3">'
+          + '<div class="w-11 h-11 rounded-full text-white text-xs font-bold flex items-center justify-center" style="background:' + meta.color + '">' + meta.label.slice(0, 2) + '</div>'
+          + '<div><div class="font-semibold text-gray-900 text-base">' + meta.label + '</div><div class="text-xs text-gray-400 leading-5 mt-1">' + statusText + '</div></div></div>'
+          + '<div class="flex flex-wrap items-center gap-2"><span class="text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded-full">방식: ' + (connection.auth_mode || 'direct_session') + '</span>' + getSessionBadge(connection) + '</div></div>'
+          + '<div class="grid ${gridColsClass} gap-3 mb-4">'
+          + '<input id="' + platform + '-mobile-store-id" type="text" value="' + (connection.platform_store_id || '') + '" placeholder="플랫폼 매장 ID (선택)" class="px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-brand-500 outline-none">'
+          + '<div class="text-sm text-gray-500 border border-dashed border-gray-200 rounded-xl px-4 py-3">로그인 URL: ' + meta.loginUrl + '</div>'
+          + '</div>'
+          + '<div class="${actionRowClass}">'
+          + '<button onclick="openNativeLogin(\\'' + platform + '\\')" class="${actionButtonWidthClass} bg-brand-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-600 transition">앱에서 바로 로그인</button>'
+          + (connection.session_status === 'connected'
+            ? '<button onclick="openNativeReview(\\'' + platform + '\\')" class="${actionButtonWidthClass} border border-brand-200 text-brand-600 px-4 py-3 rounded-xl text-sm font-semibold hover:bg-brand-50 transition">앱에서 운영 화면 열기</button>'
+            : '')
+          + '<button onclick="loadConnections()" class="${actionButtonWidthClass} border border-gray-200 text-gray-600 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">상태 확인</button>'
+          + '<span class="text-xs text-gray-400 leading-5">세션 연결 시각: ' + (connection.session_connected_at ? new Date(connection.session_connected_at).toLocaleString('ko-KR') : '-') + '</span>'
+          + '</div></div>';
+      }).join('');
+    }
+
+    async function loadConnections() {
+      const response = await apiFetch('/api/v1/platform_connections');
+      const data = await readJsonResponse(response);
+      if (!response.ok || data.error) {
+        throw new Error(data?.error?.message || '플랫폼 세션 상태를 불러오지 못했습니다.');
+      }
+
+      renderMobileConnections(data.connections || []);
+    }
+
+    async function prepareDirectSession(platform) {
+      const storeId = document.getElementById(platform + '-mobile-store-id').value.trim();
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/connect', {
+          method: 'POST',
+          body: JSON.stringify({
+            auth_mode: 'direct_session',
+            platform_store_id: storeId || null
+          })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showMobileSessionAlert(data?.error?.message || '직접 로그인 세션 준비에 실패했습니다.', 'error');
+          return;
+        }
+
+        showMobileSessionAlert(data.message || '직접 로그인 세션이 준비되었습니다.', 'success');
+        await loadConnections();
+      } catch (error) {
+        showMobileSessionAlert('직접 로그인 세션 준비 실패: ' + error.message, 'error');
+      }
+    }
+
+    async function openNativeLogin(platform) {
+      const meta = mobilePlatformMeta[platform];
+      const storeId = document.getElementById(platform + '-mobile-store-id').value.trim();
+
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + platform + '/connect', {
+          method: 'POST',
+          body: JSON.stringify({
+            auth_mode: 'direct_session',
+            platform_store_id: storeId || null
+          })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showMobileSessionAlert(data?.error?.message || '직접 로그인 세션 준비에 실패했습니다.', 'error');
+          return;
+        }
+
+        await loadConnections();
+      } catch (error) {
+        showMobileSessionAlert('직접 로그인 세션 준비 실패: ' + error.message, 'error');
+        return;
+      }
+
+      let delivered = false;
+      try {
+        delivered = sendNativeBridgeMessage({
+          type: 'open_platform_login',
+          platform,
+          platformStoreId: storeId || null,
+          loginUrl: meta.loginUrl,
+          reviewUrl: meta.reviewUrl,
+          callbackPath: '/api/v1/platform_connections/' + platform + '/session-state'
+        });
+      } catch (error) {
+        showMobileSessionAlert('앱 브리지 호출 실패: ' + (error?.message || 'unknown error'), 'error');
+        return;
+      }
+
+      if (!delivered) {
+        showMobileSessionAlert('현재 브라우저에는 앱 브리지가 연결되어 있지 않습니다. 이 화면은 향후 모바일 앱/WebView에서 사용됩니다.', 'info');
+      } else {
+        showMobileSessionAlert(meta.label + ' 로그인 창을 여는 중입니다. 앱 로그인 화면에서 직접 인증을 완료해 주세요.', 'success');
+      }
+    }
+
+    function openNativeReview(platform) {
+      const meta = mobilePlatformMeta[platform];
+      const storeId = document.getElementById(platform + '-mobile-store-id').value.trim();
+      let delivered = false;
+
+      try {
+        delivered = sendNativeBridgeMessage({
+          type: 'open_platform_page',
+          platform,
+          platformStoreId: storeId || null,
+          pageType: 'review',
+          url: meta.reviewUrl,
+          reviewUrl: meta.reviewUrl,
+          loginUrl: meta.loginUrl,
+          callbackPath: '/api/v1/platform_connections/' + platform + '/session-state'
+        });
+      } catch (error) {
+        showMobileSessionAlert('앱 브리지 호출 실패: ' + (error?.message || 'unknown error'), 'error');
+        return;
+      }
+
+      if (!delivered) {
+        showMobileSessionAlert('현재 브라우저에는 앱 브리지가 연결되어 있지 않습니다. 이 버튼은 모바일 앱/WebView에서 사용됩니다.', 'info');
+      } else {
+        showMobileSessionAlert(meta.label + ' 리뷰 화면을 여는 중입니다. 앱 안에서 실제 목록이 보이는지 확인해 주세요.', 'success');
+      }
+    }
+
+    async function reportSessionResultFromShell(payload) {
+      if (!payload || payload.type !== 'respondio_session_result' || !payload.platform) {
+        return;
+      }
+
+      try {
+        const response = await apiFetch('/api/v1/platform_connections/' + payload.platform + '/session-state', {
+          method: 'POST',
+          body: JSON.stringify({
+            session_status: payload.sessionStatus || payload.session_status || 'error',
+            platform_store_id: payload.platformStoreId || null,
+            last_error: payload.lastError ?? null
+          })
+        });
+        const data = await readJsonResponse(response);
+        if (!response.ok || data.error) {
+          showMobileSessionAlert(data?.error?.message || '세션 상태 동기화에 실패했습니다.', 'error');
+          return;
+        }
+
+        const nextState = payload.sessionStatus || payload.session_status;
+        showMobileSessionAlert('모바일 셸이 보고한 세션 상태를 반영했습니다: ' + nextState, nextState === 'connected' ? 'success' : 'info');
+        await loadConnections();
+      } catch (error) {
+        showMobileSessionAlert('세션 상태 동기화 실패: ' + error.message, 'error');
+      }
+    }
+
+    window.addEventListener('message', function(event) {
+      const payload = event.data;
+      if (!payload || typeof payload !== 'object') {
+        return;
+      }
+
+      if (payload.type === 'respondio_session_result') {
+        reportSessionResultFromShell(payload);
+      }
+    });
+
+    loadConnections().catch(error => {
+      showMobileSessionAlert(error.message, 'error');
+    });
+  </script>
+</body>
+</html>`
+}
+
+function mobileAppShellPage() {
+  return `${baseHead('모바일 앱 셸')}
+<body class="bg-dark-950 min-h-screen text-white">
+  <main class="min-h-screen grid lg:grid-cols-[1.1fr_0.9fr]">
+    <section class="border-r border-white/10 bg-dark-900/80">
+      <div class="px-5 py-4 border-b border-white/10 flex items-center justify-between">
+        <div>
+          <h1 class="text-lg font-bold">Respondio Mobile App Shell</h1>
+          <p class="text-xs text-gray-400 mt-1">향후 네이티브 WebView가 이 역할을 그대로 가져갑니다.</p>
+        </div>
+        <a href="/settings" class="text-xs border border-white/10 text-gray-300 px-3 py-2 rounded-lg hover:bg-white/5 transition">설정으로 돌아가기</a>
+      </div>
+      <iframe id="session-center-frame" src="/mobile/session-center?app_shell=1" class="w-full h-[calc(100vh-81px)] bg-white"></iframe>
+    </section>
+    <section class="p-6 bg-dark-950">
+      <div class="max-w-xl">
+        <div class="mb-6">
+          <div class="text-xs uppercase tracking-[0.24em] text-brand-300 mb-2">Bridge Debug</div>
+          <h2 class="text-2xl font-bold mb-2">직접 로그인 세션 시뮬레이터</h2>
+          <p class="text-sm text-gray-400 leading-relaxed">왼쪽 세션 센터에서 "앱에서 바로 로그인"을 누르면, 이 셸이 네이티브 앱 브리지처럼 메시지를 받습니다. 지금은 실제 WebView 대신 세션 상태 보고를 시뮬레이션합니다.</p>
+        </div>
+
+        <div id="mobile-shell-alert" class="hidden rounded-2xl border px-5 py-4 text-sm mb-5"></div>
+
+        <div class="rounded-3xl border border-white/10 bg-white/5 p-5 mb-5">
+          <div class="text-xs text-gray-400 mb-2">현재 브리지 요청</div>
+          <div id="bridge-request-empty" class="text-sm text-gray-500">아직 받은 브리지 요청이 없습니다.</div>
+          <div id="bridge-request-panel" class="hidden space-y-3">
+            <div class="flex items-center gap-2">
+              <span id="bridge-platform-badge" class="text-xs px-2 py-1 rounded-full bg-brand-500/20 text-brand-200"></span>
+              <span id="bridge-store-id" class="text-xs text-gray-400"></span>
+            </div>
+            <div class="text-sm text-gray-200" id="bridge-login-url"></div>
+            <div class="text-xs text-gray-500" id="bridge-review-url"></div>
+            <div class="grid sm:grid-cols-3 gap-3 pt-2">
+              <button onclick="submitBridgeState('connected')" class="bg-green-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-green-600 transition">로그인 성공 처리</button>
+              <button onclick="submitBridgeState('error')" class="bg-red-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-red-600 transition">로그인 실패 처리</button>
+              <button onclick="submitBridgeState('expired')" class="bg-orange-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-orange-600 transition">세션 만료 처리</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-3xl border border-white/10 bg-white/5 p-5">
+          <div class="text-xs text-gray-400 mb-3">사용 흐름</div>
+          <ol class="space-y-3 text-sm text-gray-200">
+            <li>1. 왼쪽 세션 센터에서 "앱에서 바로 로그인"을 누름</li>
+            <li>2. 세션 준비와 브리지 요청이 함께 처리됨</li>
+            <li>3. 실제 모바일 앱에서는 여기서 플랫폼 로그인 WebView를 연 뒤 사용자가 직접 로그인</li>
+            <li>4. 로그인 성공 시 /api/v1/platform_connections/:platform/session-state 로 세션 활성 보고</li>
+          </ol>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    ensureAuthenticated();
+
+    let activeBridgeRequest = null;
+
+    function showMobileShellAlert(message, tone) {
+      const el = document.getElementById('mobile-shell-alert');
+      const styles = tone === 'error'
+        ? 'border-red-200 bg-red-50 text-red-700'
+        : tone === 'success'
+          ? 'border-green-200 bg-green-50 text-green-700'
+          : 'border-blue-200 bg-blue-50 text-blue-700';
+      el.className = 'rounded-2xl border px-5 py-4 text-sm mb-5 ' + styles;
+      el.textContent = message;
+      el.classList.remove('hidden');
+    }
+
+    function renderBridgeRequest() {
+      const empty = document.getElementById('bridge-request-empty');
+      const panel = document.getElementById('bridge-request-panel');
+
+      if (!activeBridgeRequest) {
+        empty.classList.remove('hidden');
+        panel.classList.add('hidden');
+        return;
+      }
+
+      empty.classList.add('hidden');
+      panel.classList.remove('hidden');
+      document.getElementById('bridge-platform-badge').textContent = activeBridgeRequest.platform;
+      document.getElementById('bridge-store-id').textContent = activeBridgeRequest.platformStoreId ? '매장 ID: ' + activeBridgeRequest.platformStoreId : '매장 ID 미입력';
+      document.getElementById('bridge-login-url').textContent = '로그인 URL: ' + activeBridgeRequest.loginUrl;
+      document.getElementById('bridge-review-url').textContent = '리뷰 URL: ' + activeBridgeRequest.reviewUrl;
+    }
+
+    function handleBridgePayload(rawPayload) {
+      try {
+        activeBridgeRequest = typeof rawPayload === 'string' ? JSON.parse(rawPayload) : rawPayload;
+        if (!activeBridgeRequest || activeBridgeRequest.type !== 'open_platform_login') {
+          return;
+        }
+        renderBridgeRequest();
+        showMobileShellAlert(activeBridgeRequest.platform + ' 직접 로그인 요청을 받았습니다. 실제 앱에서는 여기서 네이티브 WebView를 엽니다.', 'info');
+      } catch (error) {
+        showMobileShellAlert('브리지 메시지를 해석하지 못했습니다: ' + error.message, 'error');
+      }
+    }
+
+    function attachBridge() {
+      const frame = document.getElementById('session-center-frame');
+      if (!frame || !frame.contentWindow) return;
+
+      frame.contentWindow.RespondioNativeBridge = {
+        postMessage: function(payload) {
+          handleBridgePayload(payload);
+        }
+      };
+    }
+
+    function postSessionResultToFrame(nextState) {
+      const frame = document.getElementById('session-center-frame');
+      if (!frame || !frame.contentWindow || !activeBridgeRequest) {
+        return;
+      }
+
+      frame.contentWindow.postMessage({
+        type: 'respondio_session_result',
+        platform: activeBridgeRequest.platform,
+        platformStoreId: activeBridgeRequest.platformStoreId || null,
+        sessionStatus: nextState,
+        lastError: nextState === 'connected'
+          ? null
+          : nextState === 'expired'
+            ? '모바일 직접 로그인 세션이 만료되었습니다.'
+            : '모바일 직접 로그인 과정에서 사용자가 로그인을 완료하지 못했습니다.'
+      }, '*');
+    }
+
+    async function submitBridgeState(nextState) {
+      if (!activeBridgeRequest) {
+        showMobileShellAlert('먼저 직접 로그인 요청을 받아야 합니다.', 'error');
+        return;
+      }
+
+      try {
+        postSessionResultToFrame(nextState);
+        showMobileShellAlert('세션 상태를 iframe 안 세션 센터로 전달했습니다: ' + nextState, 'success');
+      } catch (error) {
+        showMobileShellAlert('세션 상태 보고 실패: ' + error.message, 'error');
+      }
+    }
+
+    window.addEventListener('message', function(event) {
+      handleBridgePayload(event.data);
+    });
+
+    const frame = document.getElementById('session-center-frame');
+    frame.addEventListener('load', function() {
+      attachBridge();
+    });
+    attachBridge();
+  </script>
 </body>
 </html>`
 }
@@ -1254,7 +3867,7 @@ function adminDashboardPage() {
           <h1 class="text-xl font-bold text-white">운영 현황</h1>
           <p class="text-xs text-gray-500 mt-1">Respondio 관리자 대시보드</p>
         </div>
-        <a href="/login" class="text-xs bg-white/10 text-gray-300 px-4 py-2 rounded-lg hover:bg-white/20 transition">
+        <a href="/login" onclick="logout(); return false;" class="text-xs bg-white/10 text-gray-300 px-4 py-2 rounded-lg hover:bg-white/20 transition">
           <i class="fas fa-sign-out-alt mr-1"></i>로그아웃
         </a>
       </div>
@@ -1409,14 +4022,10 @@ function adminDashboardPage() {
   </main>
 
   <script>
-    // Check admin auth
-    const user = JSON.parse(localStorage.getItem('respondio_user') || '{}');
-    if (user.role !== 'admin' && !window.location.search.includes('demo=1')) {
-      // Allow demo access but show notice
-    }
+    ensureAuthenticated('admin');
 
     // Load admin stats from API
-    fetch('/api/v1/admin/stats').then(r=>r.json()).then(data => {
+    apiFetch('/api/v1/admin/stats').then(r=>r.json()).then(data => {
       const cards = document.querySelectorAll('.admin-kpi');
       if(cards.length >= 3) {
         cards[0].querySelector('.kpi-value').textContent = (data.total_users || 0).toLocaleString();
@@ -1426,7 +4035,7 @@ function adminDashboardPage() {
     }).catch(e => {});
 
     // Load admin logs
-    fetch('/api/v1/admin/logs').then(r=>r.json()).then(data => {
+    apiFetch('/api/v1/admin/logs').then(r=>r.json()).then(data => {
       const logs = data.logs || [];
       const container = document.getElementById('admin-logs');
       if(!container || !logs.length) return;
@@ -1440,7 +4049,7 @@ function adminDashboardPage() {
     }).catch(e => {});
 
     // Load users for admin
-    fetch('/api/v1/admin/users').then(r=>r.json()).then(data => {
+    apiFetch('/api/v1/admin/users').then(r=>r.json()).then(data => {
       const users = data.users || [];
       const container = document.getElementById('admin-users-table');
       if(!container) return;
@@ -1452,7 +4061,7 @@ function adminDashboardPage() {
 
     async function retryJob(id) {
       try {
-        await fetch('/api/v1/admin/jobs/' + id + '/retry', { method: 'POST' });
+        await apiFetch('/api/v1/admin/jobs/' + id + '/retry', { method: 'POST' });
         location.reload();
       } catch(e) { alert('재시도 실패'); }
     }
@@ -1460,7 +4069,7 @@ function adminDashboardPage() {
     // Crawler status check
     async function checkCrawler() {
       try {
-        const res = await fetch('/api/v1/crawler/status');
+        const res = await apiFetch('/api/v1/crawler/status');
         const data = await res.json();
         const badge = document.getElementById('crawler-status-badge');
         if (data.crawler_status === 'online') {
@@ -1486,16 +4095,15 @@ function adminDashboardPage() {
 
     async function triggerCrawl() {
       try {
-        const res = await fetch('/api/v1/reviews/sync', {
+        const res = await apiFetch('/api/v1/reviews/sync', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ platform: 'baemin', store_id: 1 })
+          body: JSON.stringify({ platform: 'baemin' })
         });
         const data = await res.json();
         if (data.success) {
           alert('리뷰 수집 완료: ' + (data.inserted || 0) + '건 추가');
         } else {
-          alert(data.error || '수집 실패');
+          alert(data?.error?.message || '수집 실패');
         }
       } catch(e) { alert('크롤러 서버가 실행 중이 아닙니다.'); }
     }

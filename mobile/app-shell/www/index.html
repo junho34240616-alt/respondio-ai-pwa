@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Respondio Mobile Shell</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="layout">
+    <section class="viewer">
+      <header class="topbar">
+        <div>
+          <h1>Respondio Mobile Shell</h1>
+          <p>원격 세션 센터를 WebView/iframe으로 감싸는 실제 앱 셸 프로토타입입니다.</p>
+        </div>
+        <button id="reload-frame-button" class="ghost">새로고침</button>
+      </header>
+
+      <div class="controls">
+        <label>
+          <span>Respondio 앱 주소</span>
+          <input id="app-base-url" type="url" value="https://respondio-ai-pwa.pages.dev" />
+        </label>
+        <button id="open-session-center-button">세션 센터 열기</button>
+      </div>
+
+      <iframe id="session-center-frame" title="Respondio Session Center"></iframe>
+    </section>
+
+    <aside class="sidebar">
+      <section class="card">
+        <div class="eyebrow">Bridge State</div>
+        <h2>현재 로그인 요청</h2>
+        <p id="empty-state" class="muted">아직 받은 플랫폼 로그인 요청이 없습니다.</p>
+        <div id="request-panel" class="hidden">
+          <div class="badge-row">
+            <span id="platform-badge" class="badge"></span>
+            <span id="store-id-text" class="muted small"></span>
+          </div>
+          <div id="login-url" class="line"></div>
+          <div id="review-url" class="line subtle"></div>
+
+          <div class="action-grid">
+            <button id="open-platform-login-button" class="ghost">로그인 창 열기</button>
+            <button data-state="connected" class="success">로그인 성공 처리</button>
+            <button data-state="error" class="danger">로그인 실패 처리</button>
+            <button data-state="expired" class="warning">세션 만료 처리</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="eyebrow">Flow</div>
+        <ol>
+          <li>Respondio 세션 센터를 연다</li>
+          <li>사용자가 iframe/WebView 안에서 Respondio 로그인</li>
+          <li>직접 로그인 준비 후 앱 브리지 요청 수신</li>
+          <li>실제 앱에서는 플랫폼 로그인 WebView를 띄운다</li>
+          <li>성공/실패/만료 결과를 다시 세션 센터로 보낸다</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <div class="eyebrow">Event Log</div>
+        <div id="event-log" class="log"></div>
+      </section>
+    </aside>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
