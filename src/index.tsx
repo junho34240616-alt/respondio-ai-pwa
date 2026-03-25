@@ -2323,6 +2323,48 @@ function platformRemoteAuthPage(platform: string) {
       background: white;
       image-rendering: auto;
     }
+    .remote-auth-click-indicator {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 28px;
+      height: 28px;
+      margin-left: -14px;
+      margin-top: -14px;
+      border-radius: 9999px;
+      border: 2px solid rgba(34, 197, 94, 0.9);
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 0 0 8px rgba(34, 197, 94, 0.18), 0 10px 24px rgba(15, 23, 42, 0.12);
+      pointer-events: none;
+      opacity: 0;
+      transform: scale(0.72);
+      transition: opacity 0.08s ease, transform 0.08s ease, box-shadow 0.14s ease;
+      z-index: 2;
+    }
+    .remote-auth-click-indicator.visible {
+      opacity: 1;
+      transform: scale(1);
+    }
+    .remote-auth-click-indicator.typing {
+      border-color: rgba(22, 163, 74, 0.96);
+      box-shadow: 0 0 0 10px rgba(22, 163, 74, 0.16), 0 14px 28px rgba(22, 163, 74, 0.12);
+    }
+    .remote-auth-click-indicator::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 2px;
+      height: 18px;
+      border-radius: 9999px;
+      background: #16A34A;
+      transform: translate(-50%, -50%);
+      animation: remote-auth-caret-blink 0.95s step-end infinite;
+    }
+    @keyframes remote-auth-caret-blink {
+      0%, 45% { opacity: 1; }
+      46%, 100% { opacity: 0.16; }
+    }
     .remote-auth-browser-bar {
       display: flex;
       align-items: center;
@@ -2556,6 +2598,7 @@ function platformRemoteAuthPage(platform: string) {
 
           <div class="remote-auth-canvas">
             <img id="remote-auth-screenshot" alt="${meta.label} 인증 화면" class="remote-auth-screenshot cursor-crosshair select-none" />
+            <div id="remote-auth-click-indicator" class="remote-auth-click-indicator" aria-hidden="true"></div>
           </div>
 
           <div class="mt-3 text-xs text-gray-500 flex flex-wrap items-center gap-3">
@@ -2618,6 +2661,9 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthTextFlushInFlight = false;
     let remoteAuthScrollFlushTimer = null;
     let remoteAuthQueuedScrollDelta = 0;
+    let remoteAuthClickIndicatorTimer = null;
+    let remoteAuthLastClickPoint = null;
+    let remoteAuthLastOptimisticFocusAt = 0;
     let remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
 
     function extractRemoteAuthSnapshot(payload) {
@@ -2686,6 +2732,54 @@ function platformRemoteAuthPage(platform: string) {
       el.classList.toggle('ready', tone === 'ready');
     }
 
+    function getRemoteAuthPointFromEvent(event) {
+      if (!remoteAuthSnapshot?.viewport || !remoteAuthScreenshotEl) {
+        return null;
+      }
+
+      const rect = remoteAuthScreenshotEl.getBoundingClientRect();
+      if (!rect.width || !rect.height) {
+        return null;
+      }
+
+      const relativeX = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      const relativeY = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+
+      return {
+        relativeX: relativeX,
+        relativeY: relativeY,
+        x: Math.max(1, Math.round(relativeX * remoteAuthSnapshot.viewport.width)),
+        y: Math.max(1, Math.round(relativeY * remoteAuthSnapshot.viewport.height)),
+        canvasX: Math.round((remoteAuthScreenshotEl.offsetLeft || 0) + (relativeX * remoteAuthScreenshotEl.clientWidth)),
+        canvasY: Math.round((remoteAuthScreenshotEl.offsetTop || 0) + (relativeY * remoteAuthScreenshotEl.clientHeight))
+      };
+    }
+
+    function showRemoteAuthClickIndicator(point, typingReady = true) {
+      const el = document.getElementById('remote-auth-click-indicator');
+      if (!el || !point) return;
+
+      el.style.left = point.canvasX + 'px';
+      el.style.top = point.canvasY + 'px';
+      el.classList.add('visible');
+      el.classList.toggle('typing', typingReady);
+
+      if (remoteAuthClickIndicatorTimer) {
+        clearTimeout(remoteAuthClickIndicatorTimer);
+      }
+
+      remoteAuthClickIndicatorTimer = setTimeout(function() {
+        el.classList.remove('visible');
+        el.classList.remove('typing');
+      }, typingReady ? 1400 : 900);
+    }
+
+    function primeRemoteAuthTyping() {
+      focusRemoteAuthCaptureInput();
+      window.requestAnimationFrame(focusRemoteAuthCaptureInput);
+      setTimeout(focusRemoteAuthCaptureInput, 18);
+    }
+
     function scheduleRemoteAuthRefresh(delay = 120) {
       if (remoteAuthRefreshTimer) {
         clearTimeout(remoteAuthRefreshTimer);
@@ -2715,9 +2809,16 @@ function platformRemoteAuthPage(platform: string) {
       } catch (error) {
         input.focus();
       }
+
+      try {
+        const length = input.value.length;
+        if (typeof input.setSelectionRange === 'function') {
+          input.setSelectionRange(length, length);
+        }
+      } catch (error) {}
     }
 
-    function scheduleRemoteAuthTextFlush(delay = 45) {
+    function scheduleRemoteAuthTextFlush(delay = 12) {
       if (remoteAuthTextFlushTimer) {
         clearTimeout(remoteAuthTextFlushTimer);
       }
@@ -2744,8 +2845,11 @@ function platformRemoteAuthPage(platform: string) {
       input.value = '';
 
       try {
-        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 90 });
+        updateRemoteAuthFocusPill('입력 반영 중 · 계속 타이핑 가능', 'ready');
+        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 32 });
         updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
+        showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+        primeRemoteAuthTyping();
       } finally {
         remoteAuthTextFlushInFlight = false;
         if (input.value) {
@@ -2913,7 +3017,9 @@ function platformRemoteAuthPage(platform: string) {
     async function sendRemoteAuthKey(key) {
       try {
         await flushRemoteAuthText();
-        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 90 });
+        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 30 });
+        updateRemoteAuthFocusPill('특수키 입력 완료', 'ready');
+        primeRemoteAuthTyping();
       } catch (error) {
         showRemoteAuthAlert(error.message, 'error');
       }
@@ -3017,34 +3123,25 @@ function platformRemoteAuthPage(platform: string) {
 
     remoteAuthScreenshotEl.addEventListener('pointerdown', function(event) {
       event.preventDefault();
-      if (!remoteAuthSnapshot?.viewport) {
+      const point = getRemoteAuthPointFromEvent(event);
+      if (!point) {
         return;
       }
 
-      focusRemoteAuthCaptureInput();
-      updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
-      window.requestAnimationFrame(focusRemoteAuthCaptureInput);
+      remoteAuthLastClickPoint = point;
+      remoteAuthLastOptimisticFocusAt = Date.now();
+      showRemoteAuthClickIndicator(point, true);
+      updateRemoteAuthFocusPill('입력칸 활성화 중 · 바로 타이핑하세요', 'ready');
+      primeRemoteAuthTyping();
+
+      sendRemoteAuthAction({ action: 'click', x: point.x, y: point.y }, { refresh: 'deferred', delay: 34 }).then(function() {
+        updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
+      });
     });
 
-    remoteAuthScreenshotEl.addEventListener('click', async function(event) {
+    remoteAuthScreenshotEl.addEventListener('click', function(event) {
       event.preventDefault();
-      if (!remoteAuthSnapshot?.viewport) {
-        showRemoteAuthAlert('원격 브라우저 해상도가 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.', 'info');
-        return;
-      }
-      const rect = event.currentTarget.getBoundingClientRect();
-      const relativeX = (event.clientX - rect.left) / rect.width;
-      const relativeY = (event.clientY - rect.top) / rect.height;
-      const x = Math.max(1, Math.round(relativeX * remoteAuthSnapshot.viewport.width));
-      const y = Math.max(1, Math.round(relativeY * remoteAuthSnapshot.viewport.height));
-      try {
-        updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
-        focusRemoteAuthCaptureInput();
-        await sendRemoteAuthAction({ action: 'click', x: x, y: y }, { refresh: 'deferred', delay: 90 });
-        window.requestAnimationFrame(focusRemoteAuthCaptureInput);
-      } catch (error) {
-        showRemoteAuthAlert(error.message, 'error');
-      }
+      primeRemoteAuthTyping();
     });
 
     remoteAuthScreenshotEl.addEventListener('wheel', function(event) {
@@ -3055,6 +3152,7 @@ function platformRemoteAuthPage(platform: string) {
     remoteAuthCaptureInputEl.addEventListener('compositionstart', function() {
       remoteAuthComposing = true;
       updateRemoteAuthFocusPill('한글 조합 중', 'ready');
+      showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
     });
 
     remoteAuthCaptureInputEl.addEventListener('compositionend', function() {
@@ -3066,7 +3164,10 @@ function platformRemoteAuthPage(platform: string) {
       if (remoteAuthComposing) {
         return;
       }
-      scheduleRemoteAuthTextFlush(40);
+      const immediate = (Date.now() - remoteAuthLastOptimisticFocusAt) < 400;
+      updateRemoteAuthFocusPill('입력 감지됨 · 서버에 바로 반영 중', 'ready');
+      showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+      scheduleRemoteAuthTextFlush(immediate ? 0 : 10);
     });
 
     remoteAuthCaptureInputEl.addEventListener('paste', function(event) {
@@ -3076,6 +3177,8 @@ function platformRemoteAuthPage(platform: string) {
       }
       event.preventDefault();
       remoteAuthCaptureInputEl.value += pastedText;
+      updateRemoteAuthFocusPill('붙여넣기 반영 중', 'ready');
+      showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
       scheduleRemoteAuthTextFlush(0);
     });
 
