@@ -76,8 +76,8 @@ const REMOTE_AUTH_FALLBACK_SCREENSHOT_OPTIONS = {
   timeout: 0,
   style: REMOTE_AUTH_FONT_STYLE
 };
-const REMOTE_AUTH_SCREENSHOT_CACHE_MS = 250;
-const REMOTE_AUTH_SCREENSHOT_PREWARM_DELAY_MS = 40;
+const REMOTE_AUTH_SCREENSHOT_CACHE_MS = 180;
+const REMOTE_AUTH_SCREENSHOT_PREWARM_DELAY_MS = 12;
 const REMOTE_AUTH_TYPING_DELAY_MS = 0;
 
 app.use((req, res, next) => {
@@ -362,9 +362,9 @@ async function getContext(platform, storeId, options = {}) {
 
 function getRemoteAuthActionSettleMs(action) {
   if (action === 'reload' || action === 'back' || action === 'goto') return 170;
-  if (action === 'click') return 45;
-  if (action === 'press') return 30;
-  if (action === 'type') return 15;
+  if (action === 'click') return 16;
+  if (action === 'press') return 8;
+  if (action === 'type') return 0;
   if (action === 'wait') return 0;
   return 0;
 }
@@ -1940,7 +1940,14 @@ app.post('/remote-auth/:sessionId/action', async (req, res) => {
     if (action === 'click') {
       await session.page.mouse.click(Number(x || 0), Number(y || 0));
     } else if (action === 'type') {
-      await session.page.keyboard.type(String(text || ''), { delay: REMOTE_AUTH_TYPING_DELAY_MS });
+      const nextText = String(text || '');
+      if (nextText) {
+        try {
+          await session.page.keyboard.insertText(nextText);
+        } catch (insertError) {
+          await session.page.keyboard.type(nextText, { delay: REMOTE_AUTH_TYPING_DELAY_MS });
+        }
+      }
     } else if (action === 'press') {
       await session.page.keyboard.press(String(key || 'Enter'));
     } else if (action === 'scroll') {
