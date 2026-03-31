@@ -207,10 +207,10 @@ async function deleteSavedSessionState(platform, storeId) {
 const PLATFORMS = {
   baemin: {
     name: '배달의민족',
-    loginUrl: 'https://biz-member.baemin.com/login?returnUrl=https%3A%2F%2Fself.baemin.com%2Finfo',
+    loginUrl: 'https://self.baemin.com/bridge',
     reviewUrl: 'https://self.baemin.com/reviews',
     fallbackLoginUrls: [
-      'https://self.baemin.com/bridge',
+      'https://biz-member.baemin.com/login?returnUrl=https%3A%2F%2Fself.baemin.com%2Finfo',
       'https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fself.baemin.com%2Fbridge'
     ],
     selectors: {
