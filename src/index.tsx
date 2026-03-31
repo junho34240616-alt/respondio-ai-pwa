@@ -2622,6 +2622,9 @@ function platformRemoteAuthPage(platform: string) {
       border-color: #86EFAC;
       color: #15803D;
     }
+    .remote-auth-panel-note {
+      white-space: pre-line;
+    }
     .remote-auth-hidden-input {
       position: fixed;
       left: 1.25rem;
@@ -2768,7 +2771,7 @@ function platformRemoteAuthPage(platform: string) {
               <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div>
                   <div class="text-sm font-semibold text-gray-900">직접 입력 모드</div>
-                  <div class="text-xs text-gray-500 mt-1 leading-5">화면 안 입력칸을 클릭하면 바로 타이핑, 한글 입력, 붙여넣기가 됩니다. 마우스 휠로 스크롤도 바로 할 수 있어요.</div>
+                  <div id="remote-auth-direct-input-help" class="text-xs text-gray-500 mt-1 leading-5">화면 안 입력칸을 클릭하면 바로 타이핑, 한글 입력, 붙여넣기가 됩니다. 입력 내용은 즉시 서버로 보내고 화면도 바로 새로고침합니다.</div>
                 </div>
                 <div id="remote-auth-focus-pill" class="remote-auth-focus-pill">입력 대상 선택 전</div>
               </div>
@@ -2789,9 +2792,10 @@ function platformRemoteAuthPage(platform: string) {
         <aside class="space-y-6 remote-auth-side-panel">
           <section class="bg-white border border-gray-100 rounded-3xl p-5 shadow-sm">
             <div class="text-sm font-semibold text-gray-900 mb-2">완료 처리</div>
-            <p class="text-xs text-gray-500 leading-6 mb-4">${meta.label} 운영 화면까지 진입했거나, 더 이상 추가 인증/CAPTCHA 단계가 아닌 상태라면 아래 버튼으로 세션을 연결 완료 처리하세요.</p>
+            <p id="remote-auth-complete-help" class="text-xs text-gray-500 leading-6 mb-4 remote-auth-panel-note">${meta.label} 운영 화면까지 진입했거나, 더 이상 추가 인증/CAPTCHA 단계가 아닌 상태라면 아래 버튼으로 세션을 연결 완료 처리하세요.</p>
             <div class="space-y-3">
               <button id="remote-auth-complete-btn" onclick="completeRemoteAuth()" class="w-full bg-green-500 text-white px-4 py-3 rounded-xl text-sm font-semibold hover:bg-green-600 transition disabled:opacity-50 disabled:cursor-not-allowed" disabled>인증 완료 후 설정으로 돌아가기</button>
+              <button id="remote-auth-clean-retry-btn" onclick="restartRemoteAuth(true)" class="hidden w-full border border-orange-200 text-orange-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-orange-50 transition">저장 세션 없이 새로 시작</button>
               <button onclick="window.location.href='/reviews'" class="w-full border border-gray-200 text-gray-700 px-4 py-3 rounded-xl text-sm font-medium hover:bg-gray-50 transition">리뷰 관리로 이동</button>
             </div>
           </section>
@@ -2821,7 +2825,6 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthQueuedScrollDelta = 0;
     let remoteAuthClickIndicatorTimer = null;
     let remoteAuthTypingIndicatorTimer = null;
-    let remoteAuthTypingRefreshTimer = null;
     let remoteAuthLastClickPoint = null;
     let remoteAuthLastOptimisticFocusAt = 0;
     let remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
@@ -2902,6 +2905,51 @@ function platformRemoteAuthPage(platform: string) {
       if (!el) return;
       el.textContent = message;
       el.classList.toggle('ready', tone === 'ready');
+    }
+
+    function updateRemoteAuthSidePanel(snapshot) {
+      const helpEl = document.getElementById('remote-auth-complete-help');
+      const completeButton = document.getElementById('remote-auth-complete-btn');
+      const retryButton = document.getElementById('remote-auth-clean-retry-btn');
+      const directInputHelpEl = document.getElementById('remote-auth-direct-input-help');
+
+      if (!helpEl || !completeButton || !retryButton || !directInputHelpEl) {
+        return;
+      }
+
+      if (!snapshot) {
+        helpEl.textContent = remotePlatformLabel + ' 운영 화면까지 진입했거나, 더 이상 추가 인증/CAPTCHA 단계가 아닌 상태라면 아래 버튼으로 세션을 연결 완료 처리하세요.';
+        completeButton.textContent = '인증 완료 후 설정으로 돌아가기';
+        retryButton.classList.add('hidden');
+        directInputHelpEl.textContent = '화면 안 입력칸을 클릭하면 바로 타이핑, 한글 입력, 붙여넣기가 됩니다. 입력 내용은 즉시 서버로 보내고 화면도 바로 새로고침합니다.';
+        return;
+      }
+
+      if (snapshot.status === 'blocked') {
+        helpEl.textContent = snapshot.message || (remotePlatformLabel + '이 현재 서버 브라우저를 차단했습니다. 이 상태에서는 완료 처리 대신 새 세션 또는 다른 실행 환경이 필요합니다.');
+        completeButton.textContent = '차단 상태에서는 완료할 수 없습니다';
+        directInputHelpEl.textContent = remotePlatform === 'coupang_eats'
+          ? '쿠팡이츠는 현재 서버 IP 또는 실행 환경을 차단한 상태로 보입니다. 새로고침보다 실행 환경 변경이 더 중요합니다.'
+          : '차단 상태가 감지되면 저장 세션 없이 새로 시작해 보고, 계속 반복되면 실행 환경을 바꿔야 할 수 있습니다.';
+        retryButton.textContent = remotePlatform === 'baemin' ? '저장 세션 없이 새로 시작' : '새 세션으로 다시 확인';
+        retryButton.classList.remove('hidden');
+        return;
+      }
+
+      retryButton.classList.add('hidden');
+      completeButton.textContent = snapshot.can_complete
+        ? '인증 완료 후 설정으로 돌아가기'
+        : '운영 화면 진입 후 완료 가능';
+
+      if (snapshot.can_complete) {
+        helpEl.textContent = remotePlatformLabel + ' 운영 화면 또는 리뷰 화면까지 진입했습니다. 추가 인증이 더 이상 필요 없으면 완료 처리 버튼으로 세션 연결을 마무리하세요.';
+      } else if (snapshot.status === 'needs_user_action') {
+        helpEl.textContent = snapshot.message || (remotePlatformLabel + ' 화면 안에서 추가 버튼이나 인증 단계를 먼저 진행해주세요.');
+      } else {
+        helpEl.textContent = remotePlatformLabel + ' 운영 화면까지 진입했거나, 더 이상 추가 인증/CAPTCHA 단계가 아닌 상태라면 아래 버튼으로 세션을 연결 완료 처리하세요.';
+      }
+
+      directInputHelpEl.textContent = '화면 안 입력칸을 클릭하면 바로 타이핑, 한글 입력, 붙여넣기가 됩니다. 입력 내용은 즉시 서버로 보내고 화면도 바로 새로고침합니다.';
     }
 
     function getRemoteAuthPointFromEvent(event) {
@@ -3014,17 +3062,6 @@ function platformRemoteAuthPage(platform: string) {
       }, delay);
     }
 
-    function scheduleRemoteAuthTypingRefresh(delay = 90) {
-      if (remoteAuthTypingRefreshTimer) {
-        clearTimeout(remoteAuthTypingRefreshTimer);
-      }
-      remoteAuthTypingRefreshTimer = setTimeout(function() {
-        refreshRemoteAuthStatus().catch(function(error) {
-          showRemoteAuthAlert(error.message, 'error');
-        });
-      }, Math.max(0, delay));
-    }
-
     function queueRemoteAuthAction(task) {
       remoteAuthActionChain = remoteAuthActionChain
         .then(task)
@@ -3081,8 +3118,7 @@ function platformRemoteAuthPage(platform: string) {
       try {
         updateRemoteAuthFocusPill('입력 반영 중 · 계속 타이핑 가능', 'ready');
         showRemoteAuthTypingIndicator(value, 1400);
-        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'none' });
-        scheduleRemoteAuthTypingRefresh(90);
+        await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 0 });
         updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
         showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
         primeRemoteAuthTyping();
@@ -3147,6 +3183,7 @@ function platformRemoteAuthPage(platform: string) {
         completeButton.disabled = true;
         resolutionEl.textContent = '해상도 확인 중...';
         sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
+        updateRemoteAuthSidePanel(null);
         return;
       }
 
@@ -3168,6 +3205,7 @@ function platformRemoteAuthPage(platform: string) {
       completeButton.disabled = !snapshot.can_complete;
       resolutionEl.textContent = snapshot.viewport ? ('원격 브라우저 해상도: ' + snapshot.viewport.width + ' x ' + snapshot.viewport.height) : '원격 브라우저 해상도 확인 중';
       sessionIdEl.textContent = remoteAuthSessionId ? '세션 ID: ' + remoteAuthSessionId : '';
+      updateRemoteAuthSidePanel(snapshot);
       if (!remoteAuthHasVisibleScreenshot) {
         setRemoteAuthLoadingStage(snapshot.message || '로그인 화면을 준비하는 중입니다.', false);
       }
@@ -3258,7 +3296,7 @@ function platformRemoteAuthPage(platform: string) {
           updateRemoteAuthStatus(snapshot);
         }
         if (options.refresh === 'deferred') {
-          scheduleRemoteAuthRefresh(options.delay || 80);
+          scheduleRemoteAuthRefresh(options.delay ?? 80);
         } else if (options.refresh === 'none') {
           return;
         } else {
@@ -3270,7 +3308,7 @@ function platformRemoteAuthPage(platform: string) {
     async function sendRemoteAuthKey(key) {
       try {
         await flushRemoteAuthText();
-        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 18 });
+        await sendRemoteAuthAction({ action: 'press', key: key }, { refresh: 'deferred', delay: 0 });
         updateRemoteAuthFocusPill('특수키 입력 완료', 'ready');
         primeRemoteAuthTyping();
       } catch (error) {
@@ -3346,16 +3384,31 @@ function platformRemoteAuthPage(platform: string) {
         refreshRemoteAuthStatus().catch(function(error) {
           showRemoteAuthAlert(error.message, 'error');
         });
-      }, 1200);
+      }, 900);
     }
 
-    async function startRemoteAuth() {
+    function resetRemoteAuthVisualState() {
+      const image = document.getElementById('remote-auth-screenshot');
+      remoteAuthHasVisibleScreenshot = false;
+      hideRemoteAuthTypingIndicator(0);
+      if (image) {
+        image.removeAttribute('src');
+      }
+      if (remoteAuthScreenshotObjectUrl) {
+        URL.revokeObjectURL(remoteAuthScreenshotObjectUrl);
+        remoteAuthScreenshotObjectUrl = null;
+      }
+    }
+
+    async function startRemoteAuth(options = {}) {
       try {
+        resetRemoteAuthVisualState();
         setRemoteAuthLoadingStage('원격 브라우저 세션을 만드는 중입니다. 이 단계가 끝나면 로그인 페이지가 바로 표시됩니다.', false);
         const response = await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/start', {
           method: 'POST',
           body: JSON.stringify({
-            platform_store_id: initialPlatformStoreId || null
+            platform_store_id: initialPlatformStoreId || null,
+            ignore_saved_session: !!options.ignoreSavedSession
           })
         });
         const data = await readJsonResponse(response);
@@ -3375,6 +3428,25 @@ function platformRemoteAuthPage(platform: string) {
       }
     }
 
+    async function restartRemoteAuth(ignoreSavedSession = false) {
+      const previousSessionId = remoteAuthSessionId;
+      stopRemoteAuthPolling();
+      remoteAuthSessionId = '';
+      remoteAuthSnapshot = null;
+      updateRemoteAuthStatus(null);
+      resetRemoteAuthVisualState();
+
+      if (previousSessionId) {
+        try {
+          await apiFetch('/api/v1/platform_connections/' + remotePlatform + '/remote-auth/' + previousSessionId + '/cancel', {
+            method: 'POST'
+          });
+        } catch (error) {}
+      }
+
+      return startRemoteAuth({ ignoreSavedSession: ignoreSavedSession });
+    }
+
     const remoteAuthScreenshotEl = document.getElementById('remote-auth-screenshot');
     const remoteAuthCaptureInputEl = document.getElementById('remote-auth-capture-input');
 
@@ -3391,7 +3463,7 @@ function platformRemoteAuthPage(platform: string) {
       updateRemoteAuthFocusPill('입력칸 활성화 중 · 바로 타이핑하세요', 'ready');
       primeRemoteAuthTyping();
 
-      sendRemoteAuthAction({ action: 'click', x: point.x, y: point.y }, { refresh: 'deferred', delay: 20 }).then(function() {
+      sendRemoteAuthAction({ action: 'click', x: point.x, y: point.y }, { refresh: 'deferred', delay: 0 }).then(function() {
         updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
       });
     });

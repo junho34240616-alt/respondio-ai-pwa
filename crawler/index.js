@@ -105,30 +105,6 @@ const PLATFORM_REMOTE_AUTH_BLOCK_PATTERNS = {
   ],
   yogiyo: []
 };
-const REMOTE_AUTH_STEALTH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
-const REMOTE_AUTH_GENERIC_BLOCKED_PATTERNS = [
-  'access denied',
-  'you do not have permission',
-  'you don\'t have permission',
-  'errors.edgesuite.net',
-  'request blocked',
-  'bot detected',
-  'forbidden',
-  '서비스 이용이 제한',
-  '접근이 거부',
-  '권한이 없습니다'
-];
-const REMOTE_AUTH_BAEMIN_BLOCKED_PATTERNS = [
-  '잠시 이용이 제한돼요',
-  '비정상 동작이 감지되어',
-  '잠시 후 다시 시도해 주세요',
-  '잠시후 다시 시도해주세요'
-];
-const REMOTE_AUTH_COUPANG_BLOCKED_PATTERNS = [
-  'access denied',
-  'errors.edgesuite.net',
-  'request blocked'
-];
 
 app.use((req, res, next) => {
   if (req.path === '/health') {
@@ -235,7 +211,6 @@ const PLATFORMS = {
     reviewUrl: 'https://self.baemin.com/reviews',
     fallbackLoginUrls: [
       'https://self.baemin.com/login',
-      'https://self.baemin.com/bridge',
       'https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fself.baemin.com%2Fbridge'
     ],
     selectors: {
@@ -302,6 +277,7 @@ const launchArgs = [
   '--disable-setuid-sandbox',
   '--disable-dev-shm-usage',
   '--disable-blink-features=AutomationControlled',
+  '--disable-features=TranslateUI',
   '--lang=ko-KR',
   '--window-size=1280,1760'
 ];
@@ -342,14 +318,17 @@ async function closePlatformSession(platform, storeId) {
   } catch (error) {}
 }
 
-async function createPlatformSession(platform, storeId) {
+async function createPlatformSession(platform, storeId, options = {}) {
   const sessionKey = getSessionKey(platform, storeId);
   const normalizedStoreId = normalizeStoreId(storeId);
   const viewport = { width: 1280, height: 1760 };
-  const savedState = await readSavedSessionState(platform, normalizedStoreId);
+  const savedState = options.ignoreSavedSession
+    ? null
+    : await readSavedSessionState(platform, normalizedStoreId);
   const browser = await chromium.launch({
     headless: true,
     chromiumSandbox: false,
+    ignoreDefaultArgs: ['--enable-automation'],
     args: launchArgs
   });
 
@@ -363,9 +342,11 @@ async function createPlatformSession(platform, storeId) {
   const context = await browser.newContext({
     userAgent: REMOTE_AUTH_USER_AGENT,
     viewport,
+    screen: viewport,
     deviceScaleFactor: 2,
     locale: 'ko-KR',
     timezoneId: 'Asia/Seoul',
+    colorScheme: 'light',
     ...(savedState?.state ? { storageState: savedState.state } : {}),
     extraHTTPHeaders: {
       'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
@@ -442,7 +423,7 @@ async function createPlatformSession(platform, storeId) {
 }
 
 async function getContext(platform, storeId, options = {}) {
-  const { fresh = false } = options;
+  const { fresh = false, ignoreSavedSession = false } = options;
   const sessionKey = getSessionKey(platform, storeId);
   const existing = platformSessions.get(sessionKey);
 
@@ -454,7 +435,7 @@ async function getContext(platform, storeId, options = {}) {
     await closePlatformSession(platform, storeId);
   }
 
-  return createPlatformSession(platform, storeId);
+  return createPlatformSession(platform, storeId, { ignoreSavedSession });
 }
 
 function getRemoteAuthActionSettleMs(action) {
@@ -828,14 +809,48 @@ function flattenDiagnosticsText(diagnostics) {
     .toLowerCase();
 }
 
+function containsRemoteAuthPattern(text, patterns = []) {
+  return patterns.some((pattern) => String(text || '').includes(String(pattern || '').toLowerCase()));
+}
+
+function getRemoteAuthBlockMessage(platform, currentUrl, title = '', bodyText = '') {
+  const combinedText = [currentUrl, title, bodyText].filter(Boolean).join(' ').toLowerCase();
+  const platformPatterns = PLATFORM_REMOTE_AUTH_BLOCK_PATTERNS[platform] || [];
+
+  if (platform === 'baemin' && containsRemoteAuthPattern(combinedText, platformPatterns)) {
+    return `배민이 현재 서버 브라우저를 비정상 동작으로 판단해 일시 제한했습니다. 서버 IP 또는 브라우저 지문 차단일 수 있어 다른 실행 환경이 필요할 수 있습니다. (${currentUrl})`;
+  }
+
+  if (platform === 'coupang_eats' && containsRemoteAuthPattern(combinedText, platformPatterns)) {
+    return `쿠팡이츠가 현재 서버 IP 또는 접속 환경을 차단하고 있습니다. Render 서버 대신 로컬 또는 다른 IP 환경이 필요할 수 있습니다. (${currentUrl})`;
+  }
+
+  if (containsRemoteAuthPattern(combinedText, GENERIC_REMOTE_AUTH_BLOCK_PATTERNS)) {
+    return `플랫폼이 현재 서버 브라우저의 접근을 차단했습니다. 접속 환경을 바꿔 다시 시도해야 할 수 있습니다. (${currentUrl})`;
+  }
+
+  return '';
+}
+
+async function readRemoteAuthSignals(page) {
+  const currentUrl = page.url();
+  const title = await page.title().catch(() => '');
+  const bodyText = await page.evaluate(() => {
+    return (document.body?.innerText || document.body?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 2000);
+  }).catch(() => '');
+
+  return { currentUrl, title, bodyText };
+}
+
 function deriveLoginFailureMessage(platform, currentUrl, diagnostics) {
   const text = flattenDiagnosticsText(diagnostics);
+  const blockedMessage = getRemoteAuthBlockMessage(platform, currentUrl, '', text);
+
+  if (blockedMessage) {
+    return `로그인 실패 - ${blockedMessage}`;
+  }
 
   if (platform === 'baemin') {
-    if (text.includes('잠시 이용이 제한') || text.includes('비정상 동작이 감지')) {
-      return `로그인 실패 - 배민이 현재 서버 브라우저를 비정상 동작으로 판단해 일시 제한했습니다. 다른 IP 또는 실행 환경이 필요할 수 있습니다. (${currentUrl})`;
-    }
-
     if (text.includes('captcha') || text.includes('자동입력 방지')) {
       return `로그인 실패 - 네이버 추가 인증 또는 CAPTCHA가 표시되었습니다. 현재 서버 자동 로그인으로는 진행하기 어렵습니다. (${currentUrl})`;
     }
@@ -888,11 +903,53 @@ function isLoginSuccessUrl(platform, currentUrl) {
   return false;
 }
 
+function isPlatformEntrySurface(platform, currentUrl, title, bodyText) {
+  const normalizedUrl = String(currentUrl || '').toLowerCase();
+  const normalizedTitle = String(title || '').toLowerCase();
+  const normalizedBody = String(bodyText || '').toLowerCase();
+  const text = `${normalizedTitle} ${normalizedBody} ${normalizedUrl}`;
+
+  if (platform === 'baemin') {
+    return (
+      normalizedUrl.includes('self.baemin.com/bridge') &&
+      text.includes('셀프서비스 시작하기')
+    );
+  }
+
+  return false;
+}
+
 function detectRemoteAuthBlock(platform, currentUrl, title, bodyText) {
   const normalizedUrl = String(currentUrl || '').toLowerCase();
   const normalizedTitle = String(title || '').toLowerCase();
   const normalizedBody = String(bodyText || '').toLowerCase();
   const text = `${normalizedTitle} ${normalizedBody} ${normalizedUrl}`;
+
+  if (
+    text.includes('access denied') ||
+    text.includes('you do not have permission') ||
+    text.includes("you don't have permission") ||
+    text.includes('forbidden') ||
+    text.includes('request blocked') ||
+    text.includes('bot detected') ||
+    text.includes('서비스 이용이 제한') ||
+    text.includes('접근이 거부') ||
+    text.includes('권한이 없습니다')
+  ) {
+    if (platform === 'baemin') {
+      return {
+        stage: 'blocked',
+        message: '배민이 현재 서버 브라우저를 비정상 동작 또는 차단 대상으로 판단했습니다. 코드 문제가 아니라 IP 또는 실행 환경 차단일 가능성이 큽니다.'
+      };
+    }
+
+    if (platform === 'coupang_eats') {
+      return {
+        stage: 'blocked',
+        message: '쿠팡이츠가 현재 서버 환경 또는 IP를 차단하고 있습니다. 코드 수정만으로는 해결되지 않을 수 있으며, 다른 실행 환경이 필요할 가능성이 큽니다.'
+      };
+    }
+  }
 
   if (platform === 'baemin') {
     if (
@@ -943,15 +1000,29 @@ async function openLoginSurface(platform, page, config, options = {}) {
   const perUrlTimeoutMs = Math.max(3000, Number(options.perUrlTimeoutMs || 30000));
   const afterLoadWaitMs = Math.max(0, Number(options.afterLoadWaitMs || 2000));
   const loginUrls = [config.loginUrl, ...(config.fallbackLoginUrls || [])].filter(Boolean);
+  let lastBlockState = null;
 
   for (const candidateUrl of loginUrls) {
     await page.goto(candidateUrl, { waitUntil: 'domcontentloaded', timeout: perUrlTimeoutMs });
     await page.waitForTimeout(afterLoadWaitMs);
 
+    const signals = await readRemoteAuthSignals(page);
+    const blockState = detectRemoteAuthBlock(platform, signals.currentUrl, signals.title, signals.bodyText);
+    if (blockState) {
+      lastBlockState = blockState;
+      continue;
+    }
+
+    if (isPlatformEntrySurface(platform, signals.currentUrl, signals.title, signals.bodyText)) {
+      return { opened: true, blocked: null };
+    }
+
     if (await hasVisibleLoginSurface(page, config)) {
-      return;
+      return { opened: true, blocked: null };
     }
   }
+
+  return { opened: false, blocked: lastBlockState };
 }
 
 async function bootstrapRemoteAuthSession(remoteSession) {
@@ -970,10 +1041,19 @@ async function bootstrapRemoteAuthSession(remoteSession) {
   session.remoteAuthBootstrapFinishedAt = null;
 
   try {
-    await openLoginSurface(remoteSession.platform, session.page, PLATFORMS[remoteSession.platform], {
+    const loginSurface = await openLoginSurface(remoteSession.platform, session.page, PLATFORMS[remoteSession.platform], {
       perUrlTimeoutMs: 10000,
       afterLoadWaitMs: 800
     });
+
+    if (loginSurface?.blocked) {
+      remoteSession.status = loginSurface.blocked.stage;
+      remoteSession.lastError = loginSurface.blocked.message;
+      remoteSession.updatedAt = Date.now();
+      prewarmRemoteAuthScreenshot(session, 0);
+      return;
+    }
+
     session.loggedIn = false;
     session.lastActivity = Date.now();
     remoteSession.status = 'auth_in_progress';
@@ -2087,7 +2167,7 @@ app.post('/login', async (req, res) => {
 });
 
 app.post('/remote-auth/start', async (req, res) => {
-  const { platform, store_id } = req.body || {};
+  const { platform, store_id, ignore_saved_session } = req.body || {};
 
   if (!platform || !PLATFORMS[platform]) {
     return res.status(400).json({ error: 'Invalid platform', supported: Object.keys(PLATFORMS) });
@@ -2095,7 +2175,10 @@ app.post('/remote-auth/start', async (req, res) => {
 
   try {
     const normalizedStoreId = normalizeStoreId(store_id);
-    const session = await getContext(platform, normalizedStoreId, { fresh: true });
+    const session = await getContext(platform, normalizedStoreId, {
+      fresh: true,
+      ignoreSavedSession: Boolean(ignore_saved_session)
+    });
     const sessionId = createRemoteAuthSessionId();
     const remoteSession = {
       sessionId,
@@ -2247,12 +2330,14 @@ app.post('/remote-auth/:sessionId/action', async (req, res) => {
     session.lastActivity = Date.now();
     session.screenshotDirty = true;
     prewarmRemoteAuthScreenshot(session);
+    const snapshot = await getRemoteAuthSnapshot(remoteSession).catch(() => null);
     res.json({
       success: true,
       session_id: remoteSession.sessionId,
       platform: remoteSession.platform,
       action,
-      acknowledged: true
+      acknowledged: true,
+      ...(snapshot || {})
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });

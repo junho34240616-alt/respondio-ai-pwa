@@ -571,13 +571,19 @@ async function clear_live_platform_session(c: any, platform: string, store_id: n
   return data
 }
 
-async function start_remote_platform_auth(c: any, platform: string, store_id: number) {
+async function start_remote_platform_auth(
+  c: any,
+  platform: string,
+  store_id: number,
+  options: { ignore_saved_session?: boolean } = {}
+) {
   const response = await fetch_crawler(c, '/remote-auth/start', {
     method: 'POST',
     headers: get_crawler_headers(c, true),
     body: JSON.stringify({
       platform,
-      store_id
+      store_id,
+      ignore_saved_session: !!options.ignore_saved_session
     })
   }, 12000, '원격 브라우저 준비가 지연되고 있습니다. 다시 시도하면 새 세션을 빠르게 만들 수 있습니다.')
 
@@ -2207,10 +2213,15 @@ apiRoutes.post('/platform_connections/:platform/remote-auth/start', async (c) =>
     return json_error(c, 400, 'invalid_platform', '지원하지 않는 플랫폼입니다.')
   }
 
-  const { platform_store_id } = await read_json_body<{ platform_store_id?: string | null }>(c)
+  const { platform_store_id, ignore_saved_session } = await read_json_body<{
+    platform_store_id?: string | null
+    ignore_saved_session?: boolean | null
+  }>(c)
 
   try {
-    const result = await start_remote_platform_auth(c, platform, store_id)
+    const result = await start_remote_platform_auth(c, platform, store_id, {
+      ignore_saved_session: !!ignore_saved_session
+    })
     const connection = await sync_platform_connection_record(c.env.DB, store_id, platform, {
       connection_status: 'disconnected',
       platform_store_id: platform_store_id?.trim() || undefined,

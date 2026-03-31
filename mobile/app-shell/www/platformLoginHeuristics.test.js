@@ -33,6 +33,19 @@ test('baemin selfservice start page is not auto-submitted as connected', () => {
   assert.equal(shouldAutoSubmitOutcome(outcome), false);
 });
 
+test('baemin temporary restriction page is treated as blocked', () => {
+  const outcome = detectPlatformLoginOutcome({
+    platform: 'baemin',
+    url: 'https://self.baemin.com/bridge',
+    title: '배민셀프서비스',
+    bodyText: '잠시 이용이 제한돼요 비정상 동작이 감지되어 잠시 이용이 제한돼요. 잠시후 다시 시도해 주세요.'
+  });
+
+  assert.equal(outcome.decision, 'blocked');
+  assert.equal(outcome.sessionStatus, 'error');
+  assert.equal(shouldAutoSubmitOutcome(outcome), true);
+});
+
 test('baemin review page is treated as connected', () => {
   const outcome = detectPlatformLoginOutcome({
     platform: 'baemin',

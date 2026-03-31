@@ -61,6 +61,8 @@ const GENERIC_BLOCKED_PATTERNS = [
   'forbidden',
   'request blocked',
   'bot detected',
+  '잠시 이용이 제한',
+  '비정상 동작이 감지',
   '서비스 이용이 제한',
   '접근이 거부',
   '권한이 없습니다'
