@@ -80,6 +80,55 @@ const REMOTE_AUTH_SCREENSHOT_CACHE_MS = 90;
 const REMOTE_AUTH_SCREENSHOT_PREWARM_DELAY_MS = 0;
 const REMOTE_AUTH_INITIAL_SURFACE_WAIT_MS = 1200;
 const REMOTE_AUTH_TYPING_DELAY_MS = 0;
+const REMOTE_AUTH_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
+const GENERIC_REMOTE_AUTH_BLOCK_PATTERNS = [
+  'access denied',
+  'you don\'t have permission',
+  'forbidden',
+  'request blocked',
+  'bot detected',
+  '서비스 이용이 제한',
+  '접근이 거부',
+  '권한이 없습니다'
+];
+const PLATFORM_REMOTE_AUTH_BLOCK_PATTERNS = {
+  baemin: [
+    '잠시 이용이 제한돼요',
+    '비정상 동작이 감지되어',
+    '잠시후 다시 시도해 주세요',
+    '잠시 후 다시 시도해 주세요'
+  ],
+  coupang_eats: [
+    'errors.edgesuite.net',
+    'reference #',
+    'access denied'
+  ],
+  yogiyo: []
+};
+const REMOTE_AUTH_STEALTH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36';
+const REMOTE_AUTH_GENERIC_BLOCKED_PATTERNS = [
+  'access denied',
+  'you do not have permission',
+  'you don\'t have permission',
+  'errors.edgesuite.net',
+  'request blocked',
+  'bot detected',
+  'forbidden',
+  '서비스 이용이 제한',
+  '접근이 거부',
+  '권한이 없습니다'
+];
+const REMOTE_AUTH_BAEMIN_BLOCKED_PATTERNS = [
+  '잠시 이용이 제한돼요',
+  '비정상 동작이 감지되어',
+  '잠시 후 다시 시도해 주세요',
+  '잠시후 다시 시도해주세요'
+];
+const REMOTE_AUTH_COUPANG_BLOCKED_PATTERNS = [
+  'access denied',
+  'errors.edgesuite.net',
+  'request blocked'
+];
 
 app.use((req, res, next) => {
   if (req.path === '/health') {
@@ -182,9 +231,10 @@ async function deleteSavedSessionState(platform, storeId) {
 const PLATFORMS = {
   baemin: {
     name: '배달의민족',
-    loginUrl: 'https://self.baemin.com/login',
+    loginUrl: 'https://self.baemin.com/bridge',
     reviewUrl: 'https://self.baemin.com/reviews',
     fallbackLoginUrls: [
+      'https://self.baemin.com/login',
       'https://self.baemin.com/bridge',
       'https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fself.baemin.com%2Fbridge'
     ],
@@ -250,7 +300,10 @@ const PLATFORMS = {
 const launchArgs = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage'
+  '--disable-dev-shm-usage',
+  '--disable-blink-features=AutomationControlled',
+  '--lang=ko-KR',
+  '--window-size=1280,1760'
 ];
 
 function isSessionActive(session) {
@@ -308,7 +361,7 @@ async function createPlatformSession(platform, storeId) {
   });
 
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    userAgent: REMOTE_AUTH_USER_AGENT,
     viewport,
     deviceScaleFactor: 2,
     locale: 'ko-KR',
@@ -317,6 +370,39 @@ async function createPlatformSession(platform, storeId) {
     extraHTTPHeaders: {
       'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
     }
+  });
+
+  await context.addInitScript(() => {
+    try {
+      Object.defineProperty(navigator, 'webdriver', {
+        configurable: true,
+        get: () => undefined
+      });
+      Object.defineProperty(navigator, 'languages', {
+        configurable: true,
+        get: () => ['ko-KR', 'ko', 'en-US', 'en']
+      });
+      Object.defineProperty(navigator, 'platform', {
+        configurable: true,
+        get: () => 'MacIntel'
+      });
+      Object.defineProperty(navigator, 'plugins', {
+        configurable: true,
+        get: () => [1, 2, 3, 4, 5]
+      });
+
+      window.chrome = window.chrome || { runtime: {} };
+
+      const originalQuery = window.navigator.permissions?.query;
+      if (typeof originalQuery === 'function') {
+        window.navigator.permissions.query = (parameters) => {
+          if (parameters?.name === 'notifications') {
+            return Promise.resolve({ state: Notification.permission });
+          }
+          return originalQuery.call(window.navigator.permissions, parameters);
+        };
+      }
+    } catch (error) {}
   });
 
   const page = await context.newPage();
@@ -746,6 +832,10 @@ function deriveLoginFailureMessage(platform, currentUrl, diagnostics) {
   const text = flattenDiagnosticsText(diagnostics);
 
   if (platform === 'baemin') {
+    if (text.includes('잠시 이용이 제한') || text.includes('비정상 동작이 감지')) {
+      return `로그인 실패 - 배민이 현재 서버 브라우저를 비정상 동작으로 판단해 일시 제한했습니다. 다른 IP 또는 실행 환경이 필요할 수 있습니다. (${currentUrl})`;
+    }
+
     if (text.includes('captcha') || text.includes('자동입력 방지')) {
       return `로그인 실패 - 네이버 추가 인증 또는 CAPTCHA가 표시되었습니다. 현재 서버 자동 로그인으로는 진행하기 어렵습니다. (${currentUrl})`;
     }
@@ -796,6 +886,42 @@ function isLoginSuccessUrl(platform, currentUrl) {
   }
 
   return false;
+}
+
+function detectRemoteAuthBlock(platform, currentUrl, title, bodyText) {
+  const normalizedUrl = String(currentUrl || '').toLowerCase();
+  const normalizedTitle = String(title || '').toLowerCase();
+  const normalizedBody = String(bodyText || '').toLowerCase();
+  const text = `${normalizedTitle} ${normalizedBody} ${normalizedUrl}`;
+
+  if (platform === 'baemin') {
+    if (
+      text.includes('잠시 이용이 제한') ||
+      text.includes('비정상 동작이 감지') ||
+      text.includes('잠시후 다시 시도') ||
+      text.includes('잠시 후 다시 시도')
+    ) {
+      return {
+        stage: 'blocked',
+        message: '배민이 현재 서버 브라우저를 비정상 동작으로 판단해 일시 제한했습니다. 이 경우 코드 문제가 아니라 IP 또는 실행 환경 차단일 가능성이 큽니다.'
+      };
+    }
+  }
+
+  if (platform === 'coupang_eats') {
+    if (
+      text.includes('access denied') ||
+      text.includes("you don't have permission") ||
+      text.includes('errors.edgesuite.net')
+    ) {
+      return {
+        stage: 'blocked',
+        message: '쿠팡이츠가 현재 서버 환경 또는 IP를 차단하고 있습니다. 코드 수정만으로는 해결되지 않을 수 있으며, 다른 실행 환경이 필요할 가능성이 큽니다.'
+      };
+    }
+  }
+
+  return null;
 }
 
 async function hasVisibleLoginSurface(page, config, timeout = 1200) {
@@ -893,6 +1019,7 @@ async function getRemoteAuthSnapshot(remoteSession) {
 
   let stage = canComplete ? 'ready' : 'auth_in_progress';
   let message = '로그인 화면을 진행 중입니다.';
+  const blockState = detectRemoteAuthBlock(remoteSession.platform, currentUrl, title, bodyText);
 
   if (remoteSession.lastError) {
     stage = 'error';
@@ -902,7 +1029,10 @@ async function getRemoteAuthSnapshot(remoteSession) {
     message = '원격 브라우저와 로그인 화면을 준비하는 중입니다. 잠시만 기다려주세요.';
   }
 
-  if (remoteSession.platform === 'baemin') {
+  if (blockState) {
+    stage = blockState.stage;
+    message = blockState.message;
+  } else if (remoteSession.platform === 'baemin') {
     if (currentUrl.includes('nid.naver.com/nidlogin')) {
       stage = 'auth_in_progress';
       message = '네이버 로그인 화면입니다. 아이디/비밀번호 입력 후 추가 인증이 나오면 그대로 진행해주세요.';
@@ -913,11 +1043,6 @@ async function getRemoteAuthSnapshot(remoteSession) {
       stage = 'ready';
       message = '배민 운영 화면에 진입했습니다. 인증 완료 처리 후 웹앱으로 돌아갈 수 있습니다.';
     }
-  }
-
-  if (remoteSession.platform === 'coupang_eats' && normalizedBody.includes('access denied')) {
-    stage = 'blocked';
-    message = '쿠팡이츠가 현재 서버 환경을 차단하고 있습니다. 다른 실행 환경이 필요할 수 있습니다.';
   }
 
   if (remoteSession.platform === 'yogiyo' && canComplete) {
