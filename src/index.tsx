@@ -2622,6 +2622,33 @@ function platformRemoteAuthPage(platform: string) {
       border-color: #86EFAC;
       color: #15803D;
     }
+    .remote-auth-input-echo {
+      margin-top: 0.85rem;
+      min-height: 46px;
+      padding: 0.7rem 0.9rem;
+      border-radius: 1rem;
+      border: 1px dashed #CBD5E1;
+      background: #F8FAFC;
+      color: #64748B;
+      font-size: 0.83rem;
+      line-height: 1.45;
+      transition: all 0.12s ease;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .remote-auth-input-echo.active {
+      border-style: solid;
+      border-color: #86EFAC;
+      background: #ECFDF5;
+      color: #166534;
+    }
+    .remote-auth-input-echo.pending {
+      border-style: solid;
+      border-color: #93C5FD;
+      background: #EFF6FF;
+      color: #1D4ED8;
+    }
     .remote-auth-panel-note {
       white-space: pre-line;
     }
@@ -2775,6 +2802,7 @@ function platformRemoteAuthPage(platform: string) {
                 </div>
                 <div id="remote-auth-focus-pill" class="remote-auth-focus-pill">입력 대상 선택 전</div>
               </div>
+              <div id="remote-auth-input-echo" class="remote-auth-input-echo">입력칸을 누른 뒤 바로 타이핑하면 여기에 즉시 반영됩니다.</div>
             </section>
             <div class="remote-auth-toolset">
               <button onclick="sendRemoteAuthKey('Backspace')" class="remote-auth-toolbar-btn">Backspace</button>
@@ -2825,6 +2853,7 @@ function platformRemoteAuthPage(platform: string) {
     let remoteAuthQueuedScrollDelta = 0;
     let remoteAuthClickIndicatorTimer = null;
     let remoteAuthTypingIndicatorTimer = null;
+    let remoteAuthInputEchoTimer = null;
     let remoteAuthLastClickPoint = null;
     let remoteAuthLastOptimisticFocusAt = 0;
     let remoteAuthZoom = window.innerWidth < 768 ? 1.7 : 2.2;
@@ -2905,6 +2934,41 @@ function platformRemoteAuthPage(platform: string) {
       if (!el) return;
       el.textContent = message;
       el.classList.toggle('ready', tone === 'ready');
+    }
+
+    function setRemoteAuthInputEcho(message, tone = '') {
+      const el = document.getElementById('remote-auth-input-echo');
+      if (!el) return;
+
+      if (remoteAuthInputEchoTimer) {
+        clearTimeout(remoteAuthInputEchoTimer);
+        remoteAuthInputEchoTimer = null;
+      }
+
+      el.textContent = message || '입력칸을 누른 뒤 바로 타이핑하면 여기에 즉시 반영됩니다.';
+      el.classList.toggle('active', tone === 'active');
+      el.classList.toggle('pending', tone === 'pending');
+    }
+
+    function clearRemoteAuthInputEcho(delay = 0) {
+      const reset = function() {
+        const input = document.getElementById('remote-auth-capture-input');
+        if (input && input.value) {
+          return;
+        }
+        setRemoteAuthInputEcho('', '');
+      };
+
+      if (remoteAuthInputEchoTimer) {
+        clearTimeout(remoteAuthInputEchoTimer);
+        remoteAuthInputEchoTimer = null;
+      }
+
+      if (delay > 0) {
+        remoteAuthInputEchoTimer = setTimeout(reset, delay);
+      } else {
+        reset();
+      }
     }
 
     function updateRemoteAuthSidePanel(snapshot) {
@@ -3118,6 +3182,7 @@ function platformRemoteAuthPage(platform: string) {
       try {
         updateRemoteAuthFocusPill('입력 반영 중 · 계속 타이핑 가능', 'ready');
         showRemoteAuthTypingIndicator(value, 1400);
+        setRemoteAuthInputEcho('즉시 반영: ' + value + '  ·  원격 화면 갱신 중', 'pending');
         await sendRemoteAuthAction({ action: 'type', text: value }, { refresh: 'deferred', delay: 0 });
         updateRemoteAuthFocusPill('입력 완료 · 계속 타이핑 가능', 'ready');
         showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
@@ -3271,6 +3336,7 @@ function platformRemoteAuthPage(platform: string) {
           remoteAuthHasVisibleScreenshot = true;
           setRemoteAuthLoadingStage('', true);
           hideRemoteAuthTypingIndicator(160);
+          clearRemoteAuthInputEcho(140);
           resolve(null);
         };
         image.onerror = function() {
@@ -3391,6 +3457,7 @@ function platformRemoteAuthPage(platform: string) {
       const image = document.getElementById('remote-auth-screenshot');
       remoteAuthHasVisibleScreenshot = false;
       hideRemoteAuthTypingIndicator(0);
+      clearRemoteAuthInputEcho(0);
       if (image) {
         image.removeAttribute('src');
       }
@@ -3461,10 +3528,12 @@ function platformRemoteAuthPage(platform: string) {
       remoteAuthLastOptimisticFocusAt = Date.now();
       showRemoteAuthClickIndicator(point, true);
       updateRemoteAuthFocusPill('입력칸 활성화 중 · 바로 타이핑하세요', 'ready');
+      setRemoteAuthInputEcho('입력칸 활성화 중 · 바로 타이핑하세요.', 'active');
       primeRemoteAuthTyping();
 
       sendRemoteAuthAction({ action: 'click', x: point.x, y: point.y }, { refresh: 'deferred', delay: 0 }).then(function() {
         updateRemoteAuthFocusPill('입력 준비됨 · 바로 타이핑하세요', 'ready');
+        setRemoteAuthInputEcho('입력칸 활성화 완료 · 바로 타이핑하세요.', 'active');
       });
     });
 
@@ -3482,14 +3551,17 @@ function platformRemoteAuthPage(platform: string) {
       remoteAuthComposing = true;
       updateRemoteAuthFocusPill('한글 조합 중', 'ready');
       showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+      setRemoteAuthInputEcho('한글 조합 시작', 'active');
     });
 
     remoteAuthCaptureInputEl.addEventListener('compositionupdate', function(event) {
+      setRemoteAuthInputEcho('입력 중: ' + (event.data || remoteAuthCaptureInputEl.value || '한글 입력 중'), 'active');
       showRemoteAuthTypingIndicator(event.data || remoteAuthCaptureInputEl.value || '한글 입력 중', 900);
     });
 
     remoteAuthCaptureInputEl.addEventListener('compositionend', function() {
       remoteAuthComposing = false;
+      setRemoteAuthInputEcho('즉시 반영: ' + (remoteAuthCaptureInputEl.value || '입력 반영 중'), 'pending');
       showRemoteAuthTypingIndicator(remoteAuthCaptureInputEl.value || '입력 반영 중', 1200);
       scheduleRemoteAuthTextFlush(0);
     });
@@ -3501,6 +3573,7 @@ function platformRemoteAuthPage(platform: string) {
       const immediate = (Date.now() - remoteAuthLastOptimisticFocusAt) < 400;
       updateRemoteAuthFocusPill('입력 감지됨 · 서버에 바로 반영 중', 'ready');
       showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+      setRemoteAuthInputEcho('즉시 반영: ' + (remoteAuthCaptureInputEl.value || '입력 대기 중'), immediate ? 'pending' : 'active');
       showRemoteAuthTypingIndicator(remoteAuthCaptureInputEl.value, immediate ? 1400 : 1100);
       scheduleRemoteAuthTextFlush(0);
     });
@@ -3514,6 +3587,7 @@ function platformRemoteAuthPage(platform: string) {
       remoteAuthCaptureInputEl.value += pastedText;
       updateRemoteAuthFocusPill('붙여넣기 반영 중', 'ready');
       showRemoteAuthClickIndicator(remoteAuthLastClickPoint, true);
+      setRemoteAuthInputEcho('즉시 반영: ' + remoteAuthCaptureInputEl.value, 'pending');
       showRemoteAuthTypingIndicator(remoteAuthCaptureInputEl.value, 1400);
       scheduleRemoteAuthTextFlush(0);
     });
@@ -3537,6 +3611,7 @@ function platformRemoteAuthPage(platform: string) {
       if (event.key === 'Escape') {
         event.preventDefault();
         updateRemoteAuthFocusPill('입력 대상 선택 전', '');
+        clearRemoteAuthInputEcho(0);
         remoteAuthCaptureInputEl.blur();
       }
     });

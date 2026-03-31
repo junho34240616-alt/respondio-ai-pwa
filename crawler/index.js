@@ -76,7 +76,7 @@ const REMOTE_AUTH_FALLBACK_SCREENSHOT_OPTIONS = {
   timeout: 0,
   style: REMOTE_AUTH_FONT_STYLE
 };
-const REMOTE_AUTH_SCREENSHOT_CACHE_MS = 90;
+const REMOTE_AUTH_SCREENSHOT_CACHE_MS = 320;
 const REMOTE_AUTH_SCREENSHOT_PREWARM_DELAY_MS = 0;
 const REMOTE_AUTH_INITIAL_SURFACE_WAIT_MS = 1200;
 const REMOTE_AUTH_TYPING_DELAY_MS = 0;
@@ -207,10 +207,10 @@ async function deleteSavedSessionState(platform, storeId) {
 const PLATFORMS = {
   baemin: {
     name: '배달의민족',
-    loginUrl: 'https://self.baemin.com/bridge',
+    loginUrl: 'https://biz-member.baemin.com/login?returnUrl=https%3A%2F%2Fself.baemin.com%2Finfo',
     reviewUrl: 'https://self.baemin.com/reviews',
     fallbackLoginUrls: [
-      'https://self.baemin.com/login',
+      'https://self.baemin.com/bridge',
       'https://nid.naver.com/nidlogin.login?mode=form&url=https%3A%2F%2Fself.baemin.com%2Fbridge'
     ],
     selectors: {
@@ -917,6 +917,14 @@ function isPlatformEntrySurface(platform, currentUrl, title, bodyText) {
   }
 
   return false;
+}
+
+function shouldPrewarmRemoteAuthAfterAction(action) {
+  return action === 'reload' || action === 'back' || action === 'goto' || action === 'wait';
+}
+
+function shouldIncludeRemoteAuthSnapshotAfterAction(action) {
+  return action === 'reload' || action === 'back' || action === 'goto' || action === 'wait';
 }
 
 function detectRemoteAuthBlock(platform, currentUrl, title, bodyText) {
@@ -2329,8 +2337,13 @@ app.post('/remote-auth/:sessionId/action', async (req, res) => {
 
     session.lastActivity = Date.now();
     session.screenshotDirty = true;
-    prewarmRemoteAuthScreenshot(session);
-    const snapshot = await getRemoteAuthSnapshot(remoteSession).catch(() => null);
+    if (shouldPrewarmRemoteAuthAfterAction(action)) {
+      prewarmRemoteAuthScreenshot(session);
+    }
+
+    const snapshot = shouldIncludeRemoteAuthSnapshotAfterAction(action)
+      ? await getRemoteAuthSnapshot(remoteSession).catch(() => null)
+      : null;
     res.json({
       success: true,
       session_id: remoteSession.sessionId,
